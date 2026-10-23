@@ -1,0 +1,38 @@
+[package]
+name = "symeraseme-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+build = "build.rs"
+
+[[bin]]
+name = "symeraseme-rust"
+path = "src/main.rs"
+
+[dependencies]
+base64.workspace = true
+chrono.workspace = true
+clap = { version = "4.5", features = ["derive"] }
+http.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+signal-hook.workspace = true
+symeraseme-core = { path = "../symeraseme-core", version = "0.14.1" }
+symeraseme-engine = { path = "../symeraseme-engine", version = "0.14.1" }
+subtle.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true
+rustls.workspace = true
+sha2.workspace = true
+tempfile.workspace = true

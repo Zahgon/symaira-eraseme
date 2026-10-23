@@ -21,9 +21,9 @@ symeraseme requests list
 
 ### Execution
 ```bash
-symeraseme execute --campaign initial --batch-size 5 --dry-run  # Always dry-run first
+symeraseme plan execute --campaign initial --batch-size 5 --dry-run  # Always dry-run first
 symeraseme grant execute --ttl 3600                             # Issue consent token
-symeraseme execute --campaign initial --batch-size 5 --consent <token>
+symeraseme plan execute --campaign initial --batch-size 5 --consent <token>
 ```
 
 ### Triage
@@ -50,6 +50,9 @@ symeraseme tick
 
 ## Environment
 
-Set these variables:
-- `ANTHROPIC_API_KEY` — For LLM triage
-- `SYMERASEME_DATA_DIR` — Data directory
+Configure these only when needed:
+- `ANTHROPIC_API_KEY` — Required only for LLM calls using Anthropic
+- `SYMERASEME_DATA_DIR` — Optional data-directory override
+
+The Rust-only candidate has no outbound email or browser adapters by default;
+non-dry web-form operations create manual tasks.

@@ -1,0 +1,24 @@
+[package]
+name = "symeraseme-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+symeraseme-core = { path = "../symeraseme-core", version = "0.14.1" }
+tempfile.workspace = true
+
+[dev-dependencies]
+sha2.workspace = true
+hex.workspace = true
+tempfile.workspace = true

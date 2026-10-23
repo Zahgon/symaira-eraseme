@@ -1,0 +1,437 @@
+//! Native Go/Rust HTTP response parity, including every header and raw body.
+//! Header names/order are HTTP-insensitive; only the validated Date value varies.
+
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::path::Path;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+#[path = "support/mcp_http_port.rs"]
+mod mcp_http_port;
+use mcp_http_port::{
+    StartedChild, accepts_token, free_port, read_bounded_response, spawn_with_handoff,
+};
+
+#[path = "support/frozen_http_headers.rs"]
+mod frozen_http_headers;
+
+struct Server(StartedChild);
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_none() {
+            let _ = self.0.kill();
+        }
+        let _ = self.0.wait();
+    }
+}
+
+fn start(binary: &Path, root: &Path) -> (Server, u16, String) {
+    std::fs::create_dir_all(root).unwrap();
+    let mut port = free_port();
+    let token_path = root.join("data/mcp_token");
+    let server = spawn_with_handoff(
+        &mut port,
+        &token_path,
+        Duration::from_secs(10),
+        |candidate, stderr| {
+            let mut command = Command::new(binary);
+            command
+                .args([
+                    "mcp",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    &candidate.to_string(),
+                ])
+                .current_dir(root)
+                .env_clear()
+                .env("HOME", root)
+                .env("USERPROFILE", root)
+                .env("SYMERASEME_DATA_DIR", root.join("data"))
+                .env("TMPDIR", root)
+                .env("TMP", root)
+                .env("TEMP", root)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(stderr);
+            for name in ["CONFIG", "DATA", "STATE", "CACHE"] {
+                command.env(format!("XDG_{name}_HOME"), root.join(name.to_lowercase()));
+            }
+            // Windows system APIs need the OS directory, not operator credentials/config.
+            if let Some(system_root) = std::env::var_os("SystemRoot") {
+                command.env("SystemRoot", system_root);
+            }
+            command.spawn()
+        },
+    );
+    let token = std::fs::read_to_string(token_path).unwrap();
+    (Server(server), port, token)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Response {
+    status_line: String,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+fn parse_response(raw: &[u8]) -> Response {
+    let split = raw.windows(4).position(|b| b == b"\r\n\r\n").unwrap();
+    let head = std::str::from_utf8(&raw[..split]).unwrap();
+    let mut lines = head.split("\r\n");
+    let status_line = lines.next().unwrap().to_owned();
+    let mut headers = Vec::new();
+    let mut dates = 0;
+    for line in lines {
+        let (name, value) = line.split_once(':').expect("well-formed header");
+        let name = name.to_ascii_lowercase();
+        let mut value = value.to_owned();
+        if name == "date" {
+            let date = value.strip_prefix(' ').expect("HTTP Date separator");
+            let parsed = chrono::DateTime::parse_from_rfc2822(date).expect("valid HTTP Date");
+            assert_eq!(
+                date,
+                parsed
+                    .with_timezone(&chrono::Utc)
+                    .format("%a, %d %b %Y %H:%M:%S GMT")
+                    .to_string(),
+                "canonical HTTP Date"
+            );
+            dates += 1;
+            value = "<DATE>".to_owned();
+        }
+        headers.push((name, value));
+    }
+    assert_eq!(dates, 1, "exactly one Date header, not silently omitted");
+    headers.sort();
+    let body = raw[split + 4..].to_vec();
+    if let Some((_, length)) = headers.iter().find(|(name, _)| name == "content-length") {
+        assert_eq!(
+            body.len(),
+            length.trim().parse::<usize>().unwrap(),
+            "complete body"
+        );
+    } else {
+        assert!(status_line.starts_with("HTTP/1.1 204 ") && body.is_empty());
+    }
+    Response {
+        status_line,
+        headers,
+        body,
+    }
+}
+
+fn exchange(
+    implementation: &str,
+    case: usize,
+    port: u16,
+    method: &str,
+    body: &[u8],
+    headers: &[(&str, String)],
+) -> Response {
+    parse_response(&exchange_raw(
+        implementation,
+        case,
+        port,
+        method,
+        body,
+        headers,
+    ))
+}
+
+fn exchange_raw(
+    implementation: &str,
+    case: usize,
+    port: u16,
+    method: &str,
+    body: &[u8],
+    headers: &[(&str, String)],
+) -> Vec<u8> {
+    let started = Instant::now();
+    eprintln!(
+        "http_exchange thread={:?} implementation={implementation} case={case} start",
+        std::thread::current().id()
+    );
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    // Stage the whole request before sending. An early rejection can close
+    // between separate header/body writes and discard its response on reset.
+    let mut request = Vec::new();
+    write!(
+        request,
+        "{method} / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n",
+        body.len()
+    )
+    .unwrap();
+    for (name, value) in headers {
+        write!(request, "{name}: {value}\r\n").unwrap();
+    }
+    request.extend_from_slice(b"\r\n");
+    request.extend_from_slice(body);
+    stream.write_all(&request).unwrap();
+    let raw = read_bounded_response(&mut stream, Instant::now() + Duration::from_secs(5))
+        .expect("capture complete bounded HTTP response");
+    eprintln!(
+        "http_exchange thread={:?} implementation={implementation} case={case} bytes={} headers_complete={} elapsed_ms={}",
+        std::thread::current().id(),
+        raw.len(),
+        raw.windows(4).any(|bytes| bytes == b"\r\n\r\n"),
+        started.elapsed().as_millis()
+    );
+    raw
+}
+
+fn assert_matches(candidate: &Response, oracle: &Response) {
+    assert_eq!(candidate, oracle, "complete HTTP response parity");
+}
+
+#[test]
+fn bounded_response_capture_preserves_fin_and_native_reset_bytes() {
+    let raw = b"HTTP/1.1 200 OK\r\nDate: Tue, 29 Sep 2026 10:00:00 GMT\r\nContent-Length: 2\r\nContent-Type: application/json\r\n\r\n{}";
+    for (reset, body, complete) in [
+        (false, &raw[..], true),
+        (false, &raw[..raw.len() - 1], false),
+        // Windows can discard unread bytes on RST; buffered-after-reset bytes
+        // are a Unix control, not a portable delivery guarantee.
+        #[cfg(not(windows))]
+        (true, &raw[..], true),
+        #[cfg(not(windows))]
+        (true, &raw[..raw.len() - 1], false),
+    ] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        client
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (release, gate) = std::sync::mpsc::channel();
+        let (closed, observed) = std::sync::mpsc::channel();
+        let reply = body.to_vec();
+        let peer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = vec![0; if reset { 1 } else { 1024 }];
+            stream.read_exact(&mut request).unwrap();
+            gate.recv_timeout(Duration::from_secs(2)).unwrap();
+            stream.write_all(&reply).unwrap();
+            // Drain all input for FIN; leave input unread for the Unix reset.
+            drop(stream);
+            closed.send(()).unwrap();
+        });
+        client.write_all(&[b'x'; 1024]).unwrap();
+        release.send(()).unwrap();
+        observed.recv_timeout(Duration::from_secs(2)).unwrap();
+        #[cfg(target_vendor = "apple")]
+        if reset {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                match client.set_read_timeout(Some(Duration::from_secs(1))) {
+                    Err(error) => {
+                        assert_eq!(error.raw_os_error(), Some(22), "native reset boundary");
+                        break;
+                    }
+                    Ok(()) => {
+                        assert!(Instant::now() < deadline, "peer reset not observed");
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+            }
+        }
+        let captured =
+            read_bounded_response(&mut client, Instant::now() + Duration::from_secs(2)).unwrap();
+        peer.join().unwrap();
+        assert_eq!(
+            captured, body,
+            "preserve the native buffered response bytes"
+        );
+        assert_eq!(
+            std::panic::catch_unwind(|| parse_response(&captured)).is_ok(),
+            complete,
+            "the transport close must not hide a truncated body"
+        );
+    }
+}
+
+#[test]
+fn bounded_response_capture_enforces_deadline_and_size() {
+    use std::io::ErrorKind;
+
+    for (size, expired, expected_error) in [
+        (0, true, Some(ErrorKind::TimedOut)),
+        (64 * 1024, false, None),
+        (64 * 1024 + 1, false, Some(ErrorKind::InvalidData)),
+    ] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let peer = std::thread::spawn(move || stream.write_all(&vec![b'x'; size]).unwrap());
+        let deadline = Instant::now()
+            + if expired {
+                Duration::ZERO
+            } else {
+                Duration::from_secs(2)
+            };
+        let captured = read_bounded_response(&mut client, deadline);
+        peer.join().unwrap();
+        if let Some(kind) = expected_error {
+            assert_eq!(captured.unwrap_err().kind(), kind);
+        } else {
+            assert_eq!(captured.unwrap(), vec![b'x'; size]);
+        }
+    }
+}
+
+#[test]
+fn readiness_probe_is_bounded_when_peer_dribbles_bytes() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    listener.set_nonblocking(true).unwrap();
+    let (started, observed) = std::sync::mpsc::channel();
+    let peer = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "probe never connected");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("accept probe: {error}"),
+            }
+        };
+        // Windows inherits the listener's nonblocking mode.
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let mut request = [0; 4096];
+        assert!(stream.read(&mut request).unwrap() > 0);
+        started.send(()).unwrap();
+        for _ in 0..32 {
+            if stream.write_all(b"x").is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    });
+    let start = Instant::now();
+    let authenticated = accepts_token(port, "probe-token", start + Duration::from_millis(200));
+    let elapsed = start.elapsed();
+    observed.recv_timeout(Duration::from_secs(2)).unwrap();
+    peer.join().unwrap();
+    assert!(!authenticated, "an incomplete response is not readiness");
+    eprintln!("readiness probe elapsed: {elapsed:?}");
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "readiness ignored its total bound: {elapsed:?}"
+    );
+}
+
+#[test]
+fn header_comparison_rejects_missing_extra_changed_and_duplicate_headers() {
+    let raw = b"HTTP/1.1 200 OK\r\nDate: Tue, 29 Sep 2026 10:00:00 GMT\r\nContent-Length: 2\r\nContent-Type: application/json\r\n\r\n{}";
+    let baseline = parse_response(raw);
+    assert_matches(&baseline, &baseline);
+    let mut variants = Vec::new();
+    let mut missing = baseline.clone();
+    missing.headers.retain(|(name, _)| name != "content-type");
+    variants.push(missing);
+    let mut extra = baseline.clone();
+    extra.headers.push(("x-unexpected".into(), "value".into()));
+    variants.push(extra);
+    let mut changed = baseline.clone();
+    changed.headers[0].1 = "changed".into();
+    variants.push(changed);
+    let mut duplicate = baseline.clone();
+    duplicate.headers.push(duplicate.headers[0].clone());
+    variants.push(duplicate);
+    let mut body = baseline.clone();
+    body.body = b"[]".to_vec();
+    variants.push(body);
+    for variant in variants {
+        assert!(std::panic::catch_unwind(|| assert_matches(&variant, &baseline)).is_err());
+    }
+    assert!(std::panic::catch_unwind(|| parse_response(&raw[..raw.len() - 1])).is_err());
+    let padded = String::from_utf8(raw.to_vec())
+        .unwrap()
+        .replace("application/json", "application/json ");
+    assert!(
+        std::panic::catch_unwind(|| assert_matches(&parse_response(padded.as_bytes()), &baseline))
+            .is_err()
+    );
+    let non_http_date = String::from_utf8(raw.to_vec())
+        .unwrap()
+        .replace(" GMT", " +0000");
+    assert!(std::panic::catch_unwind(|| parse_response(non_http_date.as_bytes())).is_err());
+}
+
+#[test]
+fn native_http_complete_headers_and_bodies_match_go() {
+    let root = tempfile::tempdir().unwrap();
+    let frozen = frozen_http_headers::observations();
+    let go_token = "recorded-private-native-bearer-token";
+    let (rust_server, rust_port, rust_token) = start(
+        Path::new(env!("CARGO_BIN_EXE_symeraseme-rust")),
+        &root.path().join("rust"),
+    );
+    let cases: [(&str, &[u8], bool, Option<&str>); 10] = [
+        ("GET", b"", false, None),
+        ("POST", b"{}", false, None),
+        ("POST", br#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#, true, Some("https://evil.example")),
+        ("POST", br#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#, true, Some("")),
+        ("POST", br#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#, true, Some("http://[::1]:8000")),
+        ("POST", br#"{"jsonrpc":"2.0","method":"initialize"}"#, true, None),
+        ("POST", br#"[{"jsonrpc":"2.0","id":1,"method":"initialize"},{"jsonrpc":"2.0","method":"notifications/initialized"}]"#, true, None),
+        ("POST", br#"[{"jsonrpc":"2.0","method":"notifications/initialized"}]"#, true, None),
+        ("POST", b"[]", true, None),
+        ("POST", br#"[{"jsonrpc":"2.0","id":1,"method":"initialize"},7]"#, true, None),
+    ];
+    for (index, (method, body, authorized, origin)) in cases.into_iter().enumerate() {
+        let headers = |token: &str| {
+            let mut headers = Vec::new();
+            if authorized {
+                headers.push(("Authorization", format!("Bearer {token}")));
+            }
+            if let Some(origin) = origin {
+                headers.push(("Origin", origin.to_owned()));
+            }
+            headers
+        };
+        let rust = exchange(
+            "rust",
+            index,
+            rust_port,
+            method,
+            body,
+            &headers(&rust_token),
+        );
+        let go_headers = headers(go_token);
+        let request = frozen_http_headers::request(method, body, &go_headers);
+        let raw = frozen.reply(index, &request);
+        let go = parse_response(&raw);
+        let expected_status = [405, 401, 403, 200, 200, 204, 200, 204, 200, 200][index];
+        for reply in [&rust, &go] {
+            assert_eq!(
+                reply.status_line.split_whitespace().nth(1).unwrap(),
+                expected_status.to_string(),
+                "case {index}"
+            );
+        }
+        assert_matches(&rust, &go);
+    }
+    drop(rust_server);
+}

@@ -1,24 +1,40 @@
 # SymairaEraseMe
 
 Native SwiftUI macOS app for the Symaira EraseMe dashboard. Connects to the
-self-contained Go MCP JSON-RPC server (`symeraseme mcp`) over HTTP.
+self-contained Rust MCP JSON-RPC server (`symeraseme mcp`) over HTTP in this
+source checkout.
+
+This source prepares the Rust-backed app and CLI at version 0.14.1.
+Choose a published version and its channel on
+[GitHub releases](https://github.com/danieljustus/symaira-eraseme/releases).
+The Rust-only layout was introduced in the
+[`v0.14.0` canary prerelease](https://github.com/danieljustus/symaira-eraseme/releases/tag/v0.14.0).
+Its DMG completed Developer ID signing, notarization, stapling and attestation;
+local builds below may be ad-hoc signed. The historical `v0.13.0` prerelease
+remains dual-backend and unchanged; `v0.12.1` is the last Go-only stable release.
+Canary publication does not complete stable or Go-retirement technical
+acceptance. The maintainer authorized Go-source retirement and waived only
+the seven-day post-stable observation period on 2026-10-12.
 
 ## Requirements
 
 - macOS 14+ (Sonoma)
 - Swift 5.10+ with Xcode or Xcode-beta installed (SwiftUI macro plugins required)
-- Go 1.26+ for development builds (the release app bundles the Go server)
+- Rust 1.98.0 for the bundled CLI/MCP server
+- Python 3 for the local backend-staging script
+
+Go is not needed to build or run the app or execute the repository's normal
+Rust tests. Go implementation and module files have been removed; frozen
+observations and immutable source history remain for conformance checks.
 
 ## Build
 
 ```bash
-# Using the build script (builds Swift + Go and colocates both binaries)
+# Build the Swift app and stage its Rust CLI/MCP server
 ./build.sh
 
-# Or manually with Xcode (then build the Go server next to the Swift binary)
+# Or build the SwiftUI app by itself when using an existing Rust server
 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer swift build
-GO_BIN="$(swift build --show-bin-path)/symeraseme"
-(cd ../.. && CGO_ENABLED=0 go build -trimpath -o "$GO_BIN" ./cmd/symeraseme)
 
 # Or open in Xcode
 open Package.swift
@@ -49,7 +65,7 @@ Sources/SymairaEraseMe/
 │   └── Profile.swift        IdentityProfile, ExecuteResponse
 ├── Services/
 │   ├── MCPClient.swift      JSON-RPC 2.0 HTTP actor (tools/call, tools/list)
-│   └── ServerManager.swift  Bundled/Dev/Homebrew Go server process manager
+│   └── ServerManager.swift  Bundled/Dev/Homebrew Rust server process manager
 ├── ViewModels/     @MainActor ObservableObject view models
 │   ├── DashboardViewModel.swift
 │   ├── CampaignsViewModel.swift
@@ -75,7 +91,7 @@ Sources/SymairaEraseMe/
 ## How It Works
 
 1. The app starts and shows the sidebar navigation.
-2. Go to **Settings** and click **Start Server** to spawn the bundled `symeraseme mcp` binary.
+2. Go to **Settings** and click **Start Server** to spawn the bundled Rust `symeraseme mcp` binary.
 3. The app connects to `http://127.0.0.1:8000` via JSON-RPC 2.0.
 4. Each view fetches data from the appropriate MCP tool.
 5. The app parses `result.content[0].text` → JSON → Swift models.
@@ -97,9 +113,9 @@ Sources/SymairaEraseMe/
 - SwiftUI apps require Xcode (or Xcode-beta) for the macro plugins that power
   `@State`, `@StateObject`, `@Binding`, etc. Building with plain `swift build`
   from CommandLineTools alone will fail.
-- Release bundles include the Go MCP server and need no Python installation or
-  external runtime. Development builds use the sibling Go binary produced by
-  `build.sh`; a Homebrew `symeraseme` or configured Binary Path is supported as
-  a fallback.
+- The current Rust-only source-tree candidate stages its Rust MCP server through
+  `build.sh`, which uses Python 3 to locate the compiler output. Running the staged
+  Rust backend requires no Go or Python runtime. This does not describe the already-published dual-backend
+  `v0.13.0` prerelease assets.
 - No external Swift dependencies beyond the Symaira AppKit packages declared
   in `Package.swift`.

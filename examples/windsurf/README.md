@@ -21,7 +21,8 @@ ln -sf /path/to/symaira-eraseme/skills ~/.codeium/windsurf/skills/symaira-erasem
 
 ### Option 3: Auto-Discovery
 
-Windsurf also discovers skills from `.agents/skills/` (already configured in this repo).
+Windsurf also discovers skills from `.agents/skills/`. The symlink is untracked;
+create it with `./scripts/setup-agents.sh --agent codex`.
 
 ## Rules (Optional Enhancement)
 
@@ -51,7 +52,7 @@ Create `.windsurf/workflows/remove-data.md`:
 1. Run `symeraseme init-profile` to set up identity
 2. Run `symeraseme plan create --campaign initial --max 5`
 3. Review plan with user
-4. Execute with `symeraseme execute --campaign initial --batch-size 5`
+4. Execute with `symeraseme plan execute --campaign initial --batch-size 5 --consent <token>`
 5. Set up daily triage: `symeraseme poll-inbox && symeraseme tick`
 ```
 
@@ -68,6 +69,9 @@ Type `@symaira-eraseme` in the Cascade chat or simply describe your request:
 Windsurf's agent will automatically detect when to use the skill based on the description in SKILL.md.
 
 ## Environment Variables
+
+These overrides are optional. `ANTHROPIC_API_KEY` is needed only for LLM calls
+using the Anthropic provider; `SYMERASEME_DATA_DIR` changes the default data directory.
 
 ```bash
 export ANTHROPIC_API_KEY="sk-ant-..."

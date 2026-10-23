@@ -1,3 +1,96 @@
 # Generated encrypted interoperability fixtures are binary.
 tests/fixtures/identity-contract/*.enc binary
 tests/fixtures/event-store/crypto/*.db binary
+
+# Embedded completion scripts have byte-exact Go/Rust golden contracts.
+crates/symeraseme-cli/src/commands/completion/*.txt text eol=lf
+
+# Canonical templates are rendered against byte-exact cross-platform goldens.
+registry/laws/** text eol=lf
+registry/templates/** text eol=lf
+
+# Go sources are read by rust-tests/parity/oracle/*/main.go and hashed
+# against a pinned sourceSHA256 provenance constant (verifySourceHash). A
+# Windows checkout with the platform's common core.autocrlf=true default
+# rewrites LF to CRLF, changing the hash and making the oracle exit non-zero
+# with no visible diagnostic in the Rust test's panic message beyond "exited
+# unsuccessfully" (frozen_fixture_matches_live_go_oracle in
+# scheduler_parity.rs). Force LF unconditionally so every checkout — and
+# every future oracle's pinned hash — sees the same bytes as `git blame`.
+*.go text eol=lf
+
+# Profile oracle helper provenance is byte-hashed on native Windows too.
+rust-tests/parity/profile_read.py text eol=lf
+rust-tests/parity/oracle/profile_read/cases.json text eol=lf
+
+# MCP contract fixtures are included with include_bytes! and compared
+# byte-for-byte against generated responses. A Windows checkout with the
+# platform default core.autocrlf=true rewrites the trailing LF to CRLF and the
+# comparison then fails on Windows only, while every Unix gate stays green.
+tests/fixtures/mcp-contract/** text eol=lf
+tests/fixtures/llm-failures-next/*.json text eol=lf
+
+# Migration oracle inputs and generator identities are byte-hashed on Windows.
+rust-tests/parity/oracle/migration-state/** text eol=lf
+rust-tests/parity/oracle/migration-safety/** text eol=lf
+rust-tests/parity/oracle/mcp-stdio-mutations/** text eol=lf
+rust-tests/parity/oracle/mcp-triage/agent.sh text eol=lf
+rust-tests/parity/oracle/campaign-execution/cases.json text eol=lf
+
+# These source-bound contracts hash raw bytes, including on native Windows.
+registry/brokers/eu/adventori-eu.yaml text eol=lf
+# Complete embedded broker inputs are now source-bound by native MCP captures.
+registry/brokers/**/*.yaml text eol=lf
+tests/fixtures/event-store/golden-campaign.db binary
+tests/fixtures/registry-contract/*.yaml text eol=lf
+tests/fixtures/event-store/campaign-plan-bytes-oracle.json text eol=lf
+rust-tests/parity/oracle/imap-transport/transcript_cases.json text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf
+internal/templating/templates/** text eol=lf
+scripts/consent-oracle/** text eol=lf
+
+# Broker reply corpus bytes are pinned by triage-corpus/dom004c.json.
+tests/fixtures/broker_replies/*.txt text eol=lf
+
+# Oracle-regenerated JSON fixtures compared byte-for-byte against live Go
+# output, which is always LF, including on Windows checkouts.
+tests/fixtures/provider-cancel/*.json text eol=lf
+
+# Actual captured byte streams must survive Windows autocrlf unchanged.
+tests/fixtures/go-frozen/** -text
+tests/fixtures/go-frozen/**/manifest.json text eol=lf
+# Native Python manifests retain the producing host's measured line endings.
+tests/fixtures/go-frozen/native-0d/** -text
+rust-tests/parity/oracle/projection/cases.json text eol=lf
+rust-tests/parity/oracle/config/inputs.json text eol=lf
+rust-tests/parity/oracle/config/config_cases.json text eol=lf
+rust-tests/parity/fixtures/frozen/** -text
+rust-tests/parity/oracle/cases.json text eol=lf
+
+# Preserve actual whole MCP runtime captures after the generic manifest rule.
+tests/fixtures/go-frozen/mcp-runtime/** -text
+tests/fixtures/go-frozen/cli-grant-native-344/** -text
+tests/fixtures/go-frozen/mcp-runtime-native-85/** -text
+tests/fixtures/go-frozen/cli-schedule-native-85/** -text
+tests/fixtures/go-frozen/unix-process-8feb/** -text
+
+# Whole authenticated native manifests retain actual producer bytes.
+tests/fixtures/go-frozen/unix-process-native097/** -text
+
+# Reviewed dependency-refresh captures retain native LF/CRLF producer bytes.
+tests/fixtures/go-frozen/refresh-*/** -text
+
+# Published Go rollback artifact identities are pinned byte-for-byte.
+tests/fixtures/go-rollback/** -text
+# Native backup/restore measures the exact committed harness bytes on Windows.
+rust-tests/parity/src/bin/store_sandbox_control.rs text eol=lf
+rust-tests/parity/go_build_info.py text eol=lf
+rust-tests/parity/backup_restore_rehearsal.py text eol=lf
+rust-tests/parity/plain_store_switchback.py text eol=lf
+rust-tests/parity/linux_store_sandbox.py text eol=lf
+rust-tests/parity/windows_store_sandbox.py text eol=lf
+rust-tests/parity/prepare_backup_restore.py text eol=lf
+rust-tests/parity/test_plain_backup_restore.py text eol=lf
+docs/rust-port/backup-restore-rehearsal.md text eol=lf
+.github/workflows/backup-restore-native.yml text eol=lf

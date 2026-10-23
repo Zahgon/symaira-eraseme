@@ -3,26 +3,27 @@
 ## Quick start
 
 1. Clone the repository and create a feature branch.
-2. Build and verify the Go CLI:
+2. Build and verify the Rust CLI candidate:
 
    ```bash
-   make build
-   make test
-   make lint
-   make coverage
+   make build-rust
+   make rust-gate
    ```
 
 3. For the macOS GUI, use a full Xcode installation:
 
    ```bash
+   make app-test
    ./app/SymairaEraseMe/build.sh
    ```
 
 4. Open a pull request with a focused change and the relevant issue reference.
 
-The supported runtime is the static `symeraseme` binary. The macOS GUI is a
-Swift Package Manager application that starts the Go MCP server bundled in the
-release app. No external runtime is required for released artifacts.
+This source tree includes the Go-source retirement candidate, not a claim of
+published retirement acceptance. Historical `v0.13.0` remains a dual-backend
+prerelease; `v0.12.1` is the last Go-only stable release. Frozen Go observations
+and their immutable source history remain as conformance evidence; normal
+builds and tests require no Go installation.
 
 ## Adding a data broker
 
@@ -59,16 +60,18 @@ opt_out:
 Validate the embedded registry before opening the pull request:
 
 ```bash
-make build
-./symeraseme registry validate
+make build-rust
+./build/rust/debug/symeraseme-rust registry validate
 ```
 
 ## Code contributions
 
-- Go code must remain CGO-free (`CGO_ENABLED=0`) and compile on Linux, macOS,
-  and Windows for the supported architectures.
-- Use `gofmt`, `go vet`, and the configured `golangci-lint` checks.
-- Preserve the CLI and MCP contracts in `docs/mcp-contract.md`.
+- Rust is the current source-tree product implementation. Keep CLI and MCP
+  behavior compatible with `docs/mcp-contract.md` and use `make rust-gate` for
+  the full Rust check.
+- Use `make parity` for frozen-observation conformance. Preserve recorded
+  observations, immutable source pins and negative controls; do not regenerate
+  expected behavior from the Rust candidate or bypass provenance checks.
 - Keep secrets as references or environment configuration. Never log resolved
   secret values or commit credentials.
 - Use the existing event-store and registry abstractions instead of adding
@@ -80,17 +83,31 @@ make build
 
 | Area | Command | Scope |
 |---|---|---|
-| Go unit tests | `make test` | All Go packages |
-| Go race tests | `make test-race` | All Go packages with the race detector |
-| Go coverage | `make coverage` | Exact 75% statement gate |
-| Go static checks | `make lint && make vet` | Formatting, lint, and vet |
-| CLI cross-build | `GOOS=windows GOARCH=amd64 go build ./cmd/symeraseme` | Platform compilation |
-| macOS GUI | `cd app/SymairaEraseMe && swift test` | Swift package tests |
-| macOS packaging | `VERSION=0.12.0 ./scripts/package-dmg.sh` | App bundle and DMG path |
+| Rust CLI build | `make build-rust` | Build the current Rust CLI candidate |
+| Rust full gate | `make rust-gate` | Format, workspace check, Clippy, tests, and doctests |
+| Frozen-observation parity | `make parity` | Compare Rust behavior with recorded Go observations |
+| Rust coverage | `make coverage` | cargo-llvm-cov; 80% project lines and 90% aggregate critical-code lines |
+| Rust interpreter | `make miri` | Pinned nightly Miri contract, not whole-program race detection |
+| macOS GUI tests | `make app-test` | Swift package tests with full Xcode |
+| macOS app build | `./app/SymairaEraseMe/build.sh` | Build the app and stage its Rust CLI/MCP server |
 
 Do not weaken an assertion to make a test pass. When a test reveals a
 compatibility or byte-format mismatch, fix the implementation or document the
 intentional contract change.
+
+`make rust-gate` does not replace native platform, coverage, Miri, dependency
+security or release-artifact acceptance. `make test-race` fails explicitly:
+the retired Go race detector is not silently relabelled as a Rust check.
+
+## CI icon compilation
+
+Pull requests classify the inputs listed in `.github/workflows/ci.yml` on Linux
+before requesting a macOS runner for `app icon compile`. Changes to the native
+icon package, `.icns` file, checksum manifest, icon test/verifier scripts, or
+that workflow still run native compilation. Confirmed unrelated changes, such
+as documentation edits, skip only this icon job. Missing history, selector
+failure, or unknown output does not authorize a skip. Main pushes, manual runs,
+and scheduled runs retain native icon compilation; other CI gates are unchanged.
 
 ## Pull requests
 
@@ -107,12 +124,35 @@ permissions.
 
 ## Release changes
 
-Release configuration lives in `.goreleaser.yml` and
-`.github/workflows/release.yml`. GoReleaser produces static CLI archives; the
-Homebrew workflow writes `Formula/symeraseme.rb` from the exact published
-archives and checksums. The macOS job builds the versioned DMG and records
-whether Developer ID signing, notarization, and stapling were completed.
+Release configuration for the current Rust-only candidate lives in
+`.github/workflows/release.yml`; it builds Rust CLI archives and the macOS app.
+The historical `v0.13.0` prerelease remains dual-backend, and `v0.12.1` is the
+last Go-only stable release. The obsolete GoReleaser and golangci-lint
+configurations are removed; their historical Git versions remain available.
+The Homebrew publisher consumes exact published archives and checksums. Do not create or move
+a release tag from a feature branch; use the repository's release gate and
+verify the release assets and Homebrew Formula after publication.
 
-Do not create or move a release tag from a feature branch. Use the repository's
-release gate and verify the GitHub release assets and Homebrew Formula after
-publication.
+### Local Rust archive dry-run
+
+With Python 3.11+ and already-built native Rust binaries for all six targets:
+
+```bash
+make release-dry-run \
+  RELEASE_BINARIES=/path/to/native-binaries \
+  RELEASE_DIST=/path/to/empty-output
+```
+
+The input directory must contain `rust-binary-<os>-<arch>` for every combination
+of `darwin`, `linux`, `windows` and `amd64`, `arm64`, matching the native
+`rust-prerelease.yml` artifacts. The target checks executable headers, stages
+six archives and verifies their root layout and SHA-256 checksums. It neither
+builds binaries nor downloads or publishes anything. Missing or wrong-target
+inputs and non-empty output directories fail without cleaning existing output.
+
+Defaults are `$(RUST_TARGET_DIR)/release-binaries` and
+`$(RUST_TARGET_DIR)/release-dist`. The archive version defaults to
+`Cargo.toml`'s workspace version. An explicit `RELEASE_VERSION` changes the
+archive label only; it does not verify the executable's version or provenance.
+This packaging check does not replace the six native builds, version/smoke,
+static-dependency, SBOM, signing or release-acceptance gates.

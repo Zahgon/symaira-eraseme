@@ -1,12 +1,24 @@
 # AI Agent Integration Guide
 
+## Current product contract
+
+[PB-2026-09-09](docs/product-boundaries.md) keeps EraseMe an independent specialized product. Browse and Operate become optional Brain modules; the credential service remains independently usable. None becomes a mandatory Brain gateway/context dependency for EraseMe. Existing command/API, privacy, evidence and approval contracts remain unchanged until explicit tested migrations. Do not couple privacy workflows to the presence of Brain's GUI.
+
 **Symaira EraseMe** supports all major AI coding agents through standardized
 skill formats and adapter files.
+
+The current source uses the Rust CLI and a native SwiftUI macOS app,
+without a bundled Go backend or backend selector. Rust 1.98.0 is required for development;
+the Go implementation remains a temporary development oracle until the separate
+CUT-005 retirement. The maintainer waived the seven-day stable observation period
+and authorized retirement on 2026-10-12; all technical acceptance gates remain.
+Historical `v0.13.0` assets
+stay immutable; Rust-only candidates require fresh native and release evidence.
 
 ## Ecosystem Guidance
 
 - Before changing cross-tool integrations, shared conventions, or product
-  boundaries, read `../docs/00-MASTERPLAN.md` and `../ECOSYSTEM.md`.
+  boundaries, read [PB-2026-09-09](docs/product-boundaries.md); it is available in standalone checkouts.
 - Keep the standalone-first contract: this repo must install, test, and run
   without any other Symaira tool installed.
 
@@ -30,7 +42,8 @@ skill formats and adapter files.
 Five agents support the **SKILL.md** standard natively:
 - Hermes, GitHub Copilot CLI, Codex CLI, Cursor, Windsurf
 
-These agents auto-discover from `.agents/skills/` (already configured in this repo).
+These agents auto-discover from `.agents/skills/`. The symlink is not tracked:
+run `./scripts/setup-agents.sh --agent all` to create it.
 
 ## Skill Bundle Contents
 
@@ -54,13 +67,13 @@ The **workflow-removal-cycle.md** template ties all sub-skills together into a r
 
 **Format**: `SKILL.md`  
 **Path**: `.claude/skills/symaira-eraseme/`  
-**Status**: ✅ Already configured (symlink exists)
+**Status**: Run the setup script to create the untracked symlink
 
 ```bash
 cd /path/to/symaira-eraseme
-# Already configured:
+./scripts/setup-agents.sh --agent claude
 ls -la .claude/skills/
-# symeraseme -> ../../skills/
+# symaira-eraseme -> ../../skills
 ```
 
 See [examples/claude-code/](examples/claude-code/) for details.
@@ -101,12 +114,12 @@ See [examples/hermes/](examples/hermes/) for details.
 
 **Format**: `SKILL.md`  
 **Path**: `.agents/skills/` or `~/.copilot/skills/`  
-**Status**: ✅ Auto-discovered from `.agents/skills/`
+**Status**: Auto-discovered after creating the untracked `.agents/skills/` symlink
 
 ```bash
-# Already configured in this repo:
+./scripts/setup-agents.sh --agent codex
 ls -la .agents/skills/
-# symaira-eraseme -> ../../skills/
+# symaira-eraseme -> ../../skills
 ```
 
 Verify:
@@ -119,10 +132,10 @@ copilot /skills info symaira-eraseme
 
 **Format**: `SKILL.md`  
 **Path**: `.agents/skills/` or `~/.codex/skills/`  
-**Status**: ✅ Auto-discovered from `.agents/skills/`
+**Status**: Auto-discovered after creating the untracked `.agents/skills/` symlink
 
 ```bash
-# Already configured in this repo
+./scripts/setup-agents.sh --agent codex
 codex /skills reload
 codex /skills info symaira-eraseme
 ```
@@ -133,13 +146,14 @@ See [examples/codex/](examples/codex/) for optional metadata file.
 
 **Format**: `SKILL.md` (skills) + `.mdc` (rules)  
 **Path**: `.cursor/skills/` or `.agents/skills/`  
-**Status**: ✅ Auto-discovered from `.agents/skills/`
+**Status**: Auto-discovered after running the setup script
 
-Optional: Add rules for enhanced context:
+Create the skills symlink:
 ```bash
-mkdir -p .cursor/rules
-cp examples/cursor/symaira-eraseme.mdc .cursor/rules/
+./scripts/setup-agents.sh --agent cursor
 ```
+
+This checkout does not include an optional `.mdc` rules template.
 
 See [examples/cursor/](examples/cursor/) for details.
 
@@ -147,14 +161,14 @@ See [examples/cursor/](examples/cursor/) for details.
 
 **Format**: `SKILL.md` (skills) + `.md` (rules)  
 **Path**: `.windsurf/skills/` or `.agents/skills/`  
-**Status**: ✅ Auto-discovered from `.agents/skills/`
+**Status**: Auto-discovered after running the setup script
 
-Optional: Add rules and workflows:
+Create the skills symlink:
 ```bash
-mkdir -p .windsurf/rules .windsurf/workflows
-cp examples/windsurf/symaira-eraseme.md .windsurf/rules/
-cp examples/windsurf/remove-data.md .windsurf/workflows/
+./scripts/setup-agents.sh --agent windsurf
 ```
+
+This checkout does not include optional Windsurf rules/workflow templates.
 
 See [examples/windsurf/](examples/windsurf/) for details.
 
@@ -166,7 +180,7 @@ See [examples/windsurf/](examples/windsurf/) for details.
 
 ```bash
 mkdir -p .continue/rules
-cp examples/continue/symaira-eraseme.md .continue/rules/
+cp examples/continue/.continue/rules/symaira-eraseme.md .continue/rules/
 ```
 
 Optional: Create `.continuerc.json` for project config.
@@ -181,7 +195,7 @@ See [examples/continue/](examples/continue/) for details.
 
 ```bash
 mkdir -p .clinerules
-cp examples/cline/00-symaira-eraseme.md .clinerules/
+cp examples/cline/.clinerules/00-symaira-eraseme.md .clinerules/
 ```
 
 Cline also auto-detects `AGENTS.md`, `.cursorrules`, and `.windsurfrules`.
@@ -212,7 +226,7 @@ For convenience, a setup script is provided:
 
 ```bash
 # Setup all supported agents
-./scripts/setup-agents.sh
+./scripts/setup-agents.sh --agent all
 
 # Setup specific agent
 ./scripts/setup-agents.sh --agent cursor
@@ -221,18 +235,22 @@ For convenience, a setup script is provided:
 
 ## Environment Variables
 
-All agents require these environment variables:
+Credentials are feature- and provider-specific, not global agent prerequisites.
+Configure the selected LLM provider only for LLM-backed features. Anthropic is
+the Rust provider's default; OpenAI, Ollama, openai-compatible and the local
+`agent` provider have their own configuration requirements.
 
 ```bash
-# Required for LLM triage
-export ANTHROPIC_API_KEY="sk-ant-..."
+# Only for LLM calls using the Anthropic provider
+export ANTHROPIC_API_KEY="<your-anthropic-key>"
 
 # Optional: Data directory
 export SYMERASEME_DATA_DIR="$HOME/.symeraseme"
 
-# Optional: CAPTCHA solving
-export CAPSOLVER_API_KEY="CAP-..."
 ```
+
+The current CLI/MCP path has no browser executor or CAPTCHA solver; web forms
+use durable manual tasks. A CAPTCHA API key does not enable browser execution.
 
 ## Testing Integration
 
@@ -268,8 +286,9 @@ Verify your agent can access the skill:
 
 ### API key errors
 
-- Set `ANTHROPIC_API_KEY` in your environment
-- For Codex/Copilot: ensure env vars are passed to the agent
+- Check the selected LLM provider and its feature-specific configuration.
+- Set `ANTHROPIC_API_KEY` only for Anthropic; the `agent` provider uses a local backend.
+- Ensure any required provider environment variables reach the agent process.
 
 ## Contributing
 
@@ -299,7 +318,7 @@ To add support for a new agent:
   (local builds need `DEVELOPER_DIR` pointing at a full Xcode installation).
 - Depends on the shared **symaira-appkit** package, pinned exact in
   `Package.swift`: SymairaTheme and SymairaToolKit.
-- `ServerManager` launches the bundled or development `symeraseme mcp` Go
+- `ServerManager` launches the bundled or development `symeraseme mcp` Rust
   binary over HTTP; Homebrew/configured Binary Path is the fallback.
-- Migration context: see `../docs/go-test-port-classification.md` and
+- Migration context: see `docs/go-test-port-classification.md` and
   `TROUBLESHOOTING.md`.

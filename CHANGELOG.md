@@ -2,7 +2,70 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## [v0.14.1] - 2026-10-10
+
+Security and release-safety patch on the Rust-only line. Publication starts as
+a canary; stable promotion requires candidate-bound acceptance. The seven-day
+post-stable observation and separate Go-source retirement are not implied.
+
+### Security
+
+- Preserve an existing identity key when configured key material is invalid;
+  create a key only when the source is genuinely missing (#1208).
+- Serialize consent-token consumption with a native lock on the existing token
+  file so overlapping authorizations cannot both succeed (#1208).
+
+### Fixed
+
+- Complete CLI archives, the signed macOS DMG, checksum manifests and
+  attestations in a draft before publishing the immutable canary. Publication
+  checks remain active with Python optimization enabled (#1213).
+- Require the exact stable, immutable release before non-dry-run Homebrew
+  publication; malformed or unavailable release state fails closed (#1210).
+- Isolate manual-task test environments in child processes without changing
+  production behavior or weakening private-file assertions (#1209).
+
+Historical `v0.13.0` and `v0.14.0` assets remain unchanged. The Go implementation
+continues only as a development oracle pending separately approved retirement.
+
+## [v0.14.0] - 2026-10-09
+
+Canary prerelease.
+
+### Changed
+
+- New CLI archives and the macOS app distribute only the Rust backend. The
+  former Go sibling and runtime selector are retired; Go remains temporarily
+  as a development oracle for copied-store compatibility checks.
+- Release provenance and archive verification bind the Rust-only payload and
+  its embedded dependency inventory. Historical `v0.13.0` assets are unchanged.
+- Removed the obsolete root Python Dependabot updater. The removed Python
+  product's `virtualenv` alerts were verified and dismissed as unused, not as
+  accepted runtime risk.
+- The Rust unsafe policy remains deny-by-default, with only the three scoped
+  Windows FFI boundaries eligible for independent review and native acceptance.
+
+## [v0.13.0] - 2026-10-06
+
+Canary prerelease. The Rust implementation becomes the default `symeraseme`
+binary; the Go implementation ships alongside it only as an explicit rollback.
+
+- **Rust cutover**: Release archives contain the Rust `symeraseme` and the Go
+  `symeraseme-go`. `SYMERASEME_BACKEND=go` dispatches to the Go sibling; both
+  read and write the same plain and encrypted data (CUT-001..003, verified
+  Go -> Rust -> Go on six native targets, #1130).
+- **Release**: Tags build the six archives natively with the Rust prerelease
+  workflow instead of GoReleaser, attach per-archive CycloneDX SBOMs and GitHub
+  build-provenance attestations, and publish them as a prerelease. Homebrew is
+  updated only for stable releases or when a canary is promoted (#1128).
+- **macOS app**: The DMG bundles the Rust backend by default with the Go
+  rollback, and its provenance is attested (#1127, #1129).
+
+- **Rust migration**: Keep browser submission and confirmation clicks as manual
+  tasks for the Rust cutover, as accepted in #809 on 2026-09-28. Dry-run previews,
+  persisted manual tasks and confirmation fallback remain supported. The
+  automatic browser executor is deferred; no clicks are performed automatically
+  by these paths (#1122).
 
 - **Release**: Notarize and staple macOS app before creating DMG, sign DMG
   container with Developer ID before notarization, staple and validate DMG with

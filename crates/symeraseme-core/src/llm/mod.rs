@@ -1,0 +1,1215 @@
+//! The LLM provider surface EraseMe itself owns.
+//!
+//! Ports `internal/llm/{llm,factory,util,agent}.go`: the usage record, the error
+//! taxonomy, the retry loop's attempt accounting, the provider resolution order
+//! and the host-agent descriptor.
+//!
+//! The non-streaming chat path used by EraseMe's classifier is implemented in
+//! [`transport`], matching Go's llmkit-backed Anthropic, OpenAI, Ollama and
+//! openai-compatible providers. Streaming, embeddings and tool calls remain
+//! outside this surface.
+
+mod transport;
+pub use transport::LlmkitClient;
+
+use std::error::Error as StdError;
+use std::ffi::OsString;
+use std::fmt;
+use std::io::Read;
+use std::path::Path;
+use std::process::{Command, Stdio};
+use std::sync::OnceLock;
+use std::thread;
+use std::time::Duration;
+use std::time::Instant;
+
+/// Cancellation shared with CoreKit's interruptible HTTP transport and host
+/// agent subprocesses.
+pub type CancellationToken = symaira_core_llm::CancellationToken;
+
+/// A single LLM usage and cost record, mirroring Go's `UsageRecord`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UsageRecord {
+    pub model: String,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_creation_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cost: f64,
+}
+
+impl UsageRecord {
+    /// Go's `Record()`: the record as a map with the same six keys.
+    ///
+    /// Go renders an integral `float64` without a decimal point (`0`, not `0.0`),
+    /// so a caller comparing JSON text must read `cost` as a number rather than
+    /// compare the two encodings character by character.
+    pub fn record(&self) -> serde_json::Value {
+        let mut out = serde_json::Map::new();
+        out.insert("model".into(), serde_json::Value::from(self.model.clone()));
+        out.insert(
+            "input_tokens".into(),
+            serde_json::Value::from(self.input_tokens),
+        );
+        out.insert(
+            "output_tokens".into(),
+            serde_json::Value::from(self.output_tokens),
+        );
+        out.insert(
+            "cache_creation_tokens".into(),
+            serde_json::Value::from(self.cache_creation_tokens),
+        );
+        out.insert(
+            "cache_read_tokens".into(),
+            serde_json::Value::from(self.cache_read_tokens),
+        );
+        out.insert("cost".into(), serde_json::Value::from(self.cost));
+        serde_json::Value::Object(out)
+    }
+}
+
+/// Go's `*Error`: a provider failure with an optional wrapped cause.
+#[derive(Clone, PartialEq)]
+pub struct LlmError {
+    message: String,
+    source: Option<String>,
+    raw_message: Option<Vec<u8>>,
+}
+
+impl fmt::Debug for LlmError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LlmError")
+            .field("message", &self.message)
+            .field("source", &self.source)
+            .finish()
+    }
+}
+
+impl LlmError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            source: None,
+            raw_message: None,
+        }
+    }
+
+    fn with_raw_message(message: String, raw_message: Vec<u8>) -> Self {
+        Self {
+            message,
+            source: None,
+            raw_message: Some(raw_message),
+        }
+    }
+
+    pub fn with_source(message: impl Into<String>, source: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            source: Some(source.into()),
+            raw_message: None,
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn raw_message_bytes(&self) -> Option<&[u8]> {
+        self.raw_message.as_deref()
+    }
+}
+
+impl fmt::Display for LlmError {
+    /// Go renders `fmt.Sprintf("%s: %v", msg, err)` and plain `msg` without a
+    /// cause.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.source {
+            Some(source) => write!(formatter, "{}: {}", self.message, source),
+            None => formatter.write_str(&self.message),
+        }
+    }
+}
+
+impl StdError for LlmError {}
+
+/// Go's `*RateLimitError`: retryable by [`BaseClient::classify`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct RateLimitError {
+    pub cause: LlmError,
+}
+
+impl fmt::Display for RateLimitError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.cause, formatter)
+    }
+}
+
+impl StdError for RateLimitError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        Some(&self.cause)
+    }
+}
+
+/// Go's `*ProviderError`: an unknown or unavailable provider was requested.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProviderError {
+    pub cause: LlmError,
+}
+
+impl fmt::Display for ProviderError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.cause, formatter)
+    }
+}
+
+impl StdError for ProviderError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        Some(&self.cause)
+    }
+}
+
+/// Every failure [`BaseClient::classify`] can return.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClientError {
+    /// Go's `*Error`, retried while attempts remain.
+    Provider(LlmError),
+    /// Go's `*RateLimitError`, retried on every attempt but the last.
+    RateLimit(RateLimitError),
+    /// Go's `*ProviderError` — never retried by the loop.
+    UnknownProvider(ProviderError),
+    /// Go's `ctx.Err()`: the context won over the attempt.
+    Context(String),
+    /// Go's `fmt.Errorf("all %d retries exhausted: %w", retries, lastErr)`. Go
+    /// only reaches it when the loop body never runs, where `lastErr` is nil and
+    /// `%w` renders as the literal `%!w(<nil>)`.
+    RetriesExhausted {
+        retries: i64,
+        source: Option<String>,
+    },
+    /// A non-retryable foreign failure, surfaced unchanged.
+    Foreign(String),
+}
+
+impl fmt::Display for ClientError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Provider(error) => fmt::Display::fmt(error, formatter),
+            Self::RateLimit(error) => fmt::Display::fmt(error, formatter),
+            Self::UnknownProvider(error) => fmt::Display::fmt(error, formatter),
+            Self::Context(message) => formatter.write_str(message),
+            Self::RetriesExhausted { retries, source } => match source {
+                Some(source) => write!(formatter, "all {retries} retries exhausted: {source}"),
+                // Go's fmt renders a nil error wrapped with %w this way.
+                None => write!(formatter, "all {retries} retries exhausted: %!w(<nil>)"),
+            },
+            Self::Foreign(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl StdError for ClientError {}
+
+impl ClientError {
+    pub fn raw_message_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Self::Provider(error) => error.raw_message_bytes(),
+            Self::RateLimit(error) => error.cause.raw_message_bytes(),
+            Self::UnknownProvider(error) => error.cause.raw_message_bytes(),
+            Self::Context(_) | Self::RetriesExhausted { .. } | Self::Foreign(_) => None,
+        }
+    }
+}
+
+/// Go's `ClassifyOptions`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ClassifyOptions {
+    pub max_tokens: i64,
+    pub temperature: f64,
+    pub cache_key: String,
+}
+
+/// Go's `BaseClient`: the shared retry loop with exponential backoff.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BaseClient {
+    pub model: String,
+    pub max_retries: i64,
+    pub cost_tracker: Vec<UsageRecord>,
+}
+
+impl BaseClient {
+    /// Go's `NewBaseClient`: a non-positive retry count means the default three,
+    /// and a missing tracker becomes an empty one.
+    pub fn new(model: impl Into<String>, max_retries: i64, cost_tracker: Vec<UsageRecord>) -> Self {
+        Self {
+            model: model.into(),
+            max_retries: if max_retries <= 0 { 3 } else { max_retries },
+            cost_tracker,
+        }
+    }
+
+    /// Go's `(*BaseClient).Classify`: run `call` until it succeeds, the context
+    /// wins, or the attempts run out.
+    ///
+    /// `context_error` stands in for `ctx.Done()`/`ctx.Err()` and answers the text
+    /// Go would return; `sleep` stands in for the backoff wait and reports whether
+    /// it completed. Both are injected so the loop is exercised without real
+    /// delays.
+    pub fn classify<C, S, X>(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        options: &ClassifyOptions,
+        mut call: C,
+        mut sleep: S,
+        context_error: X,
+    ) -> Result<(String, UsageRecord), ClientError>
+    where
+        C: FnMut(&str, &str, &ClassifyOptions) -> Result<(String, UsageRecord), ClientError>,
+        S: FnMut(Duration) -> bool,
+        X: Fn() -> Option<String>,
+    {
+        let mut attempt: i64 = 1;
+
+        while attempt <= self.max_retries {
+            match call(system_prompt, user_prompt, options) {
+                Ok(success) => return Ok(success),
+                Err(error) => {
+                    if let Some(message) = context_error() {
+                        return Err(ClientError::Context(message));
+                    }
+                    let wait = match &error {
+                        // The rate limit is retried on every attempt but the last.
+                        ClientError::RateLimit(_) if attempt < self.max_retries => {
+                            Duration::from_secs(
+                                (1u64 << attempt) + hash_cache_key(&options.cache_key) as u64,
+                            )
+                        }
+                        ClientError::RateLimit(_) => return Err(error),
+                        // A provider failure is retried on every attempt but the last.
+                        ClientError::Provider(_) if attempt < self.max_retries => {
+                            Duration::from_secs(1u64 << attempt)
+                        }
+                        // Not retryable at all: a context error raised by the call
+                        // itself, a provider-construction error, a foreign failure.
+                        _ => return Err(error),
+                    };
+                    if !sleep(wait) {
+                        return Err(ClientError::Context(
+                            context_error().unwrap_or_else(|| "context canceled".to_owned()),
+                        ));
+                    }
+                    attempt += 1;
+                }
+            }
+        }
+
+        Err(ClientError::RetriesExhausted {
+            retries: self.max_retries,
+            source: None,
+        })
+    }
+}
+
+/// Go's `hashCacheKey`: retry jitter from the cache key, with the empty key
+/// short-circuiting to zero without hashing.
+pub fn hash_cache_key(cache_key: &str) -> i64 {
+    if cache_key.is_empty() {
+        return 0;
+    }
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in cache_key.as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    i64::from(hash % 5)
+}
+
+/// How a provider is built: `llmkit` transports or the host-agent client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderKind {
+    Llmkit,
+    Agent,
+}
+
+impl ProviderKind {
+    /// Go's descriptor spelling, `"llmkit"` or `"agent"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Llmkit => "llmkit",
+            Self::Agent => "agent",
+        }
+    }
+}
+
+/// One entry of Go's unexported provider table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderSpec {
+    pub name: &'static str,
+    pub kind: ProviderKind,
+    pub env_key: &'static str,
+    pub default_model: &'static str,
+}
+
+/// Go's `providers` table, in sorted name order.
+pub const PROVIDERS: [ProviderSpec; 5] = [
+    ProviderSpec {
+        name: "agent",
+        kind: ProviderKind::Agent,
+        env_key: "",
+        default_model: "auto",
+    },
+    ProviderSpec {
+        name: "anthropic",
+        kind: ProviderKind::Llmkit,
+        env_key: "ANTHROPIC_API_KEY",
+        default_model: "claude-sonnet-4-6",
+    },
+    ProviderSpec {
+        name: "ollama",
+        kind: ProviderKind::Llmkit,
+        env_key: "",
+        default_model: "llama3.1",
+    },
+    ProviderSpec {
+        name: "openai",
+        kind: ProviderKind::Llmkit,
+        env_key: "OPENAI_API_KEY",
+        default_model: "gpt-4o",
+    },
+    ProviderSpec {
+        name: "openai-compatible",
+        kind: ProviderKind::Llmkit,
+        env_key: "",
+        default_model: "default",
+    },
+];
+
+/// Go's `ListAvailableProviders` returns a Go map's iteration order, which is not
+/// reproducible; this returns the same set sorted by name.
+pub fn list_available_providers() -> Vec<&'static str> {
+    PROVIDERS.iter().map(|spec| spec.name).collect()
+}
+
+/// Looks up a provider by name, as Go's table does.
+pub fn provider_spec(name: &str) -> Option<&'static ProviderSpec> {
+    PROVIDERS.iter().find(|spec| spec.name == name)
+}
+
+/// Go's `CreateOptions`.
+#[derive(Clone, Default, PartialEq)]
+pub struct CreateOptions {
+    pub provider: String,
+    pub model: String,
+    pub api_key: String,
+    pub base_url: String,
+    pub agent_backend: String,
+    pub cost_tracker: Vec<UsageRecord>,
+}
+
+impl fmt::Debug for CreateOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CreateOptions")
+            .field("provider", &self.provider)
+            .field("model", &self.model)
+            .field("has_api_key", &!self.api_key.is_empty())
+            .field("base_url", &self.base_url)
+            .field("agent_backend", &self.agent_backend)
+            .field("cost_tracker", &self.cost_tracker)
+            .finish()
+    }
+}
+
+/// A host coding-agent CLI, mirroring Go's `agentDefs` entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentDef {
+    pub name: &'static str,
+    pub cli: &'static str,
+    pub check_cmd: &'static [&'static str],
+    pub invoke_template: &'static [&'static str],
+}
+
+/// Go's `agentDefs`.
+pub const AGENT_DEFS: [AgentDef; 3] = [
+    AgentDef {
+        name: "claude",
+        cli: "claude",
+        check_cmd: &["claude", "--version"],
+        invoke_template: &[
+            "claude",
+            "-p",
+            "{prompt}",
+            "--output-format",
+            "text",
+            "--no-input",
+        ],
+    },
+    AgentDef {
+        name: "hermes",
+        cli: "hermes",
+        check_cmd: &["hermes", "--version"],
+        invoke_template: &["hermes", "-p", "{prompt}"],
+    },
+    AgentDef {
+        name: "copilot",
+        cli: "gh",
+        check_cmd: &["gh", "copilot", "--version"],
+        invoke_template: &["gh", "copilot", "suggest", "-p", "{prompt}"],
+    },
+];
+
+/// Go's `agentPreference`: Claude Code, then Hermes, then Copilot.
+pub const AGENT_PREFERENCE: [&str; 3] = ["claude", "hermes", "copilot"];
+
+/// The EraseMe-side client: only the host-agent provider has one in Rust.
+#[derive(Debug)]
+pub struct AgentClient {
+    pub base: BaseClient,
+    pub requested_backend: String,
+    backend_resolution: OnceLock<(String, bool)>,
+    provider_client: Option<LlmkitClient>,
+}
+
+/// The message Go's agent `callAPI` returns when no CLI is reachable.
+pub const NO_AGENT_CLI_MESSAGE: &str = "no host agent CLI detected. Install Claude Code, Hermes or GitHub Copilot CLI, or set SYMERASEME_AGENT_BACKEND";
+const AGENT_SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(120);
+
+#[derive(Clone, Copy)]
+struct AgentCommandConfig<'a> {
+    timeout: Duration,
+    executable_override: Option<&'a Path>,
+    environment: &'a [(OsString, OsString)],
+    inherit_environment: bool,
+}
+
+impl AgentClient {
+    /// Go's `NewAgentClient`, including the empty-model fallback to `auto`. The
+    /// PATH probe is the real one.
+    pub fn new(
+        model: impl Into<String>,
+        agent_backend: impl Into<String>,
+        cost_tracker: Vec<UsageRecord>,
+    ) -> Self {
+        Self {
+            base: BaseClient::new(model_or_auto(&model.into()), 3, cost_tracker),
+            requested_backend: agent_backend.into(),
+            backend_resolution: OnceLock::new(),
+            provider_client: None,
+        }
+    }
+
+    /// Go's `NewAgentClient` with an injected PATH probe.
+    ///
+    /// This eager variant keeps deterministic factory tests independent of the
+    /// process PATH. Production construction uses [`Self::new`] and resolves on
+    /// first availability check, matching Go's lazy `IsAvailable()` behavior.
+    pub fn with_probe(
+        model: impl Into<String>,
+        agent_backend: impl Into<String>,
+        cost_tracker: Vec<UsageRecord>,
+        on_path: &dyn Fn(&str) -> bool,
+    ) -> Self {
+        let model = model.into();
+        let agent_backend = agent_backend.into();
+        let resolved_backend = detect_backend(&agent_backend, on_path);
+        let available = !resolved_backend.is_empty();
+        let backend_resolution = OnceLock::new();
+        let _ = backend_resolution.set((resolved_backend, available));
+        Self {
+            base: BaseClient::new(model_or_auto(&model), 3, cost_tracker),
+            requested_backend: agent_backend,
+            backend_resolution,
+            provider_client: None,
+        }
+    }
+
+    fn with_llmkit(
+        model: String,
+        provider_client: LlmkitClient,
+        cost_tracker: Vec<UsageRecord>,
+    ) -> Self {
+        Self {
+            base: BaseClient::new(model, 3, cost_tracker),
+            requested_backend: String::new(),
+            backend_resolution: OnceLock::from((String::new(), true)),
+            provider_client: Some(provider_client),
+        }
+    }
+
+    /// Go's `(*AgentClient).IsAvailable`.
+    pub fn is_available(&self) -> bool {
+        self.resolve_backend(&cli_on_path).1
+    }
+
+    /// The backend the agent client resolved.
+    pub fn resolved_backend(&self) -> &str {
+        &self.resolve_backend(&cli_on_path).0
+    }
+
+    fn resolve_backend(&self, on_path: &dyn Fn(&str) -> bool) -> &(String, bool) {
+        self.backend_resolution.get_or_init(|| {
+            let backend = detect_backend(&self.requested_backend, on_path);
+            let available = !backend.is_empty();
+            (backend, available)
+        })
+    }
+
+    /// Go's `(*AgentClient).callAPI` as far as this port reaches: without a
+    /// reachable CLI the shared retry loop is handed the unchanged error.
+    pub fn unavailable_error(&self) -> ClientError {
+        ClientError::Provider(LlmError::new(NO_AGENT_CLI_MESSAGE))
+    }
+
+    /// Go's `AgentClient.Classify`, using the shared retry loop and real host CLI.
+    pub fn classify(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        options: &ClassifyOptions,
+    ) -> Result<(String, UsageRecord), ClientError> {
+        if let Some(client) = &self.provider_client {
+            return client.classify(&self.base, system_prompt, user_prompt, options);
+        }
+        self.classify_with_timeout_and_cancellation(
+            system_prompt,
+            user_prompt,
+            options,
+            AGENT_SUBPROCESS_TIMEOUT,
+            &CancellationToken::default(),
+        )
+    }
+
+    /// Classify while observing caller cancellation. Host-agent subprocesses
+    /// are killed promptly; the token also interrupts retry backoff.
+    pub fn classify_cancellable(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        options: &ClassifyOptions,
+        cancellation: &CancellationToken,
+    ) -> Result<(String, UsageRecord), ClientError> {
+        if let Some(client) = &self.provider_client {
+            if cancellation.is_cancelled() {
+                return Err(ClientError::Context("context canceled".to_owned()));
+            }
+            let result = client.classify_cancellable(
+                &self.base,
+                system_prompt,
+                user_prompt,
+                options,
+                cancellation,
+            );
+            return if cancellation.is_cancelled() {
+                Err(ClientError::Context("context canceled".to_owned()))
+            } else {
+                result
+            };
+        }
+        self.classify_with_timeout_and_cancellation(
+            system_prompt,
+            user_prompt,
+            options,
+            AGENT_SUBPROCESS_TIMEOUT,
+            cancellation,
+        )
+    }
+
+    fn classify_with_timeout_and_cancellation(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        options: &ClassifyOptions,
+        timeout: Duration,
+        cancellation: &CancellationToken,
+    ) -> Result<(String, UsageRecord), ClientError> {
+        self.classify_with_command(
+            system_prompt,
+            user_prompt,
+            options,
+            AgentCommandConfig {
+                timeout,
+                executable_override: None,
+                environment: &[],
+                inherit_environment: true,
+            },
+            cancellation,
+        )
+    }
+
+    fn classify_with_command(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        options: &ClassifyOptions,
+        command: AgentCommandConfig<'_>,
+        cancellation: &CancellationToken,
+    ) -> Result<(String, UsageRecord), ClientError> {
+        self.base.classify(
+            system_prompt,
+            user_prompt,
+            options,
+            |system, user, _| {
+                if command.executable_override.is_none()
+                    && command.environment.is_empty()
+                    && command.inherit_environment
+                {
+                    self.call_api(system, user, command.timeout, cancellation)
+                } else {
+                    self.call_api_with(system, user, command, cancellation)
+                }
+            },
+            |wait| wait_cancellable(wait, cancellation),
+            || {
+                cancellation
+                    .is_cancelled()
+                    .then(|| "context canceled".to_owned())
+            },
+        )
+    }
+
+    fn call_api(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        timeout: Duration,
+        cancellation: &CancellationToken,
+    ) -> Result<(String, UsageRecord), ClientError> {
+        self.call_api_with(
+            system_prompt,
+            user_prompt,
+            AgentCommandConfig {
+                timeout,
+                executable_override: None,
+                environment: &[],
+                inherit_environment: true,
+            },
+            cancellation,
+        )
+    }
+
+    fn call_api_with(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        config: AgentCommandConfig<'_>,
+        cancellation: &CancellationToken,
+    ) -> Result<(String, UsageRecord), ClientError> {
+        let backend = self.resolved_backend();
+        let Some(def) = AGENT_DEFS.iter().find(|def| def.name == backend) else {
+            return Err(self.unavailable_error());
+        };
+
+        let combined = combine_prompts(system_prompt, user_prompt);
+        let mut arguments = def
+            .invoke_template
+            .iter()
+            .skip(1)
+            .map(|part| OsString::from(part.replace("{prompt}", &combined)))
+            .collect::<Vec<_>>();
+        if !self.base.model.is_empty() && self.base.model != "auto" && def.name == "claude" {
+            arguments.push(OsString::from("--model"));
+            arguments.push(OsString::from(&self.base.model));
+        }
+
+        let executable = config
+            .executable_override
+            .unwrap_or_else(|| Path::new(def.cli));
+        let mut command = Command::new(executable);
+        command
+            .args(arguments)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if !config.inherit_environment {
+            command.env_clear();
+        }
+        command.envs(config.environment.iter().cloned());
+        // Go appends TERM=dumb to the inherited environment for every agent.
+        command.env("TERM", "dumb");
+
+        let start = Instant::now();
+        let mut child = command.spawn().map_err(|error| {
+            ClientError::Provider(LlmError::new(format!(
+                "failed to invoke host agent: {}",
+                go_spawn_error(def.cli, config.executable_override, &error)
+            )))
+        })?;
+        let stdout = child.stdout.take().expect("stdout was piped");
+        let stderr = child.stderr.take().expect("stderr was piped");
+        let stdout_reader = thread::spawn(move || read_pipe(stdout));
+        let stderr_reader = thread::spawn(move || read_pipe(stderr));
+
+        let mut timed_out = false;
+        let mut cancelled = false;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) if cancellation.is_cancelled() => {
+                    cancelled = true;
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+                Ok(None) if start.elapsed() >= config.timeout => {
+                    timed_out = true;
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+                Ok(None) => thread::sleep(Duration::from_millis(5)),
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = stdout_reader.join();
+                    let _ = stderr_reader.join();
+                    return Err(ClientError::Provider(LlmError::new(format!(
+                        "failed to invoke host agent: {}",
+                        error
+                    ))));
+                }
+            }
+        };
+        let stdout = stdout_reader
+            .join()
+            .map_err(|_| {
+                ClientError::Provider(LlmError::new(
+                    "failed to invoke host agent: stdout capture failed",
+                ))
+            })?
+            .map_err(|error| {
+                ClientError::Provider(LlmError::new(format!(
+                    "failed to invoke host agent: {}",
+                    error
+                )))
+            })?;
+        let stderr = stderr_reader
+            .join()
+            .map_err(|_| {
+                ClientError::Provider(LlmError::new(
+                    "failed to invoke host agent: stderr capture failed",
+                ))
+            })?
+            .map_err(|error| {
+                ClientError::Provider(LlmError::new(format!(
+                    "failed to invoke host agent: {}",
+                    error
+                )))
+            })?;
+
+        if timed_out {
+            return Err(ClientError::Provider(LlmError::new(format!(
+                "host agent timed out after {}m{}s",
+                AGENT_SUBPROCESS_TIMEOUT.as_secs() / 60,
+                AGENT_SUBPROCESS_TIMEOUT.as_secs() % 60
+            ))));
+        }
+        if cancelled {
+            return Err(ClientError::Context("context canceled".to_owned()));
+        }
+
+        let status = status.expect("a completed child has an exit status");
+        if !status.success() {
+            let stderr = trim_go_space(&stderr);
+            let stderr = truncate_go_bytes(stderr, 500);
+            let prefix = format!(
+                "host agent exited with code {}: ",
+                status.code().unwrap_or(-1)
+            );
+            let mut raw_message = prefix.into_bytes();
+            raw_message.extend_from_slice(stderr);
+            let message = String::from_utf8_lossy(&raw_message).into_owned();
+            return Err(ClientError::Provider(LlmError::with_raw_message(
+                message,
+                raw_message,
+            )));
+        }
+
+        let text = String::from_utf8_lossy(&stdout).trim().to_owned();
+        if text.is_empty() {
+            return Err(ClientError::Provider(LlmError::new(
+                "host agent returned empty response",
+            )));
+        }
+        Ok((
+            text,
+            UsageRecord {
+                model: format!("agent:{}", def.name),
+                ..UsageRecord::default()
+            },
+        ))
+    }
+}
+
+fn combine_prompts(system_prompt: &str, user_prompt: &str) -> String {
+    format!("{system_prompt}\n\n---\n\n{user_prompt}")
+}
+
+fn read_pipe(mut pipe: impl Read) -> std::io::Result<Vec<u8>> {
+    let mut output = Vec::new();
+    pipe.read_to_end(&mut output)?;
+    Ok(output)
+}
+
+fn wait_cancellable(wait: Duration, cancellation: &CancellationToken) -> bool {
+    let deadline = Instant::now() + wait;
+    loop {
+        if cancellation.is_cancelled() {
+            return false;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return true;
+        }
+        thread::sleep(remaining.min(Duration::from_millis(10)));
+    }
+}
+
+fn trim_go_space(bytes: &[u8]) -> &[u8] {
+    let mut cursor = 0;
+    let mut first_non_space = None;
+    let mut last_non_space_end = 0;
+    while cursor < bytes.len() {
+        let remaining = &bytes[cursor..];
+        let probe = &remaining[..remaining.len().min(4)];
+        let (character, width) = match std::str::from_utf8(probe) {
+            Ok(valid) => {
+                let character = valid.chars().next().expect("non-empty suffix");
+                (character, character.len_utf8())
+            }
+            Err(error) if error.valid_up_to() > 0 => {
+                let valid =
+                    std::str::from_utf8(&probe[..error.valid_up_to()]).expect("valid prefix");
+                let character = valid.chars().next().expect("non-empty valid prefix");
+                (character, character.len_utf8())
+            }
+            Err(_) => (char::REPLACEMENT_CHARACTER, 1),
+        };
+        if !character.is_whitespace() {
+            first_non_space.get_or_insert(cursor);
+            last_non_space_end = cursor + width;
+        }
+        cursor += width;
+    }
+    match first_non_space {
+        Some(start) => &bytes[start..last_non_space_end],
+        None => &bytes[0..0],
+    }
+}
+
+fn truncate_go_bytes(bytes: &[u8], limit: usize) -> &[u8] {
+    &bytes[..bytes.len().min(limit)]
+}
+
+fn go_spawn_error(cli: &str, override_path: Option<&Path>, error: &std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::NotFound && override_path.is_none() {
+        // Go's exec.Error renders its PATH lookup diagnostic twice through
+        // the wrapped error returned by exec.CommandContext on this path.
+        let diagnostic = format!("exec: {cli:?}: executable file not found in $PATH");
+        format!("{diagnostic}: {diagnostic}")
+    } else {
+        error.to_string()
+    }
+}
+
+/// Go's `modelOrAuto`.
+fn model_or_auto(model: &str) -> String {
+    if model.is_empty() {
+        "auto".to_owned()
+    } else {
+        model.to_owned()
+    }
+}
+
+/// Go's `detectBackend`, with the PATH probe injected for tests.
+fn detect_backend(explicit: &str, on_path: &dyn Fn(&str) -> bool) -> String {
+    if !explicit.is_empty() {
+        let lowered = explicit.to_lowercase();
+        let matched = AGENT_DEFS.iter().find(|def| def.name == lowered);
+        if matched.is_some_and(|def| on_path(def.cli)) {
+            return lowered;
+        }
+        return String::new();
+    }
+    for key in AGENT_PREFERENCE {
+        let matched = AGENT_DEFS.iter().find(|def| def.name == key);
+        if matched.is_some_and(|def| on_path(def.cli)) {
+            return key.to_owned();
+        }
+    }
+    String::new()
+}
+
+/// Go's `cliOnPath`: a PATH lookup with the executable bit.
+pub fn cli_on_path(name: &str) -> bool {
+    let path = std::env::var_os("PATH");
+    let extensions = platform_path_extensions();
+    let allow_relative = std::env::var("GODEBUG")
+        .unwrap_or_default()
+        .split(',')
+        .any(|setting| setting == "execerrdot=0");
+    let cwd = std::env::current_dir().ok();
+    cli_on_path_from_with_extensions(
+        name,
+        path.as_deref(),
+        allow_relative,
+        cwd.as_deref(),
+        &extensions,
+    )
+}
+
+#[cfg(all(unix, test))]
+fn cli_on_path_from(
+    name: &str,
+    path: Option<&std::ffi::OsStr>,
+    allow_relative: bool,
+    cwd: Option<&Path>,
+) -> bool {
+    cli_on_path_from_with_extensions(name, path, allow_relative, cwd, &platform_path_extensions())
+}
+
+fn cli_on_path_from_with_extensions(
+    name: &str,
+    path: Option<&std::ffi::OsStr>,
+    allow_relative: bool,
+    cwd: Option<&Path>,
+    extensions: &[OsString],
+) -> bool {
+    let Some(path) = path.filter(|path| !path.is_empty()) else {
+        return false;
+    };
+    let candidates = executable_candidates(name, extensions);
+    for entry in std::env::split_paths(path) {
+        let relative = entry.as_os_str().is_empty() || !entry.is_absolute();
+        if relative && !allow_relative {
+            let Some(cwd) = cwd else {
+                continue;
+            };
+            let directory = if entry.as_os_str().is_empty() {
+                cwd.to_path_buf()
+            } else {
+                cwd.join(&entry)
+            };
+            if candidates
+                .iter()
+                .any(|candidate| is_executable(&directory.join(candidate)))
+            {
+                // Go's exec.LookPath returns ErrDot when a match came from a
+                // relative PATH entry, so AgentClient treats it as unavailable.
+                return false;
+            }
+            continue;
+        }
+        let directory = if entry.as_os_str().is_empty() {
+            cwd.unwrap_or_else(|| Path::new(".")).to_path_buf()
+        } else if entry.is_absolute() {
+            entry
+        } else {
+            cwd.map_or_else(|| entry.clone(), |cwd| cwd.join(&entry))
+        };
+        if candidates
+            .iter()
+            .any(|candidate| is_executable(&directory.join(candidate)))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn executable_candidates(name: &str, extensions: &[OsString]) -> Vec<OsString> {
+    let mut candidates = Vec::new();
+    // Go's Windows findExecutable tries the bare filename only if no
+    // extensions are configured or the last path component already has one.
+    let has_extension = name
+        .rsplit(['/', '\\', ':'])
+        .next()
+        .is_some_and(|component| component.contains('.'));
+    if extensions.is_empty() || has_extension {
+        candidates.push(OsString::from(name));
+    }
+    candidates.extend(extensions.iter().map(|extension| {
+        let mut candidate = OsString::from(name);
+        candidate.push(extension);
+        candidate
+    }));
+    candidates
+}
+
+fn platform_path_extensions() -> Vec<OsString> {
+    #[cfg(windows)]
+    {
+        let pathext = std::env::var_os("PATHEXT");
+        windows_path_extensions(pathext.as_deref())
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
+
+#[cfg(any(windows, test))]
+fn windows_path_extensions(pathext: Option<&std::ffi::OsStr>) -> Vec<OsString> {
+    let pathext = pathext
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| std::ffi::OsStr::new(".COM;.EXE;.BAT;.CMD"));
+    pathext
+        .to_string_lossy()
+        .split(';')
+        .filter(|extension| !extension.is_empty())
+        .map(|extension| {
+            let normalized = if extension.starts_with('.') {
+                extension.to_owned()
+            } else {
+                format!(".{extension}")
+            };
+            OsString::from(normalized.to_ascii_lowercase())
+        })
+        .collect()
+}
+
+fn is_executable(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+#[cfg(test)]
+use crate::go_source_pin;
+
+#[cfg(test)]
+#[path = "agent_path_tests.rs"]
+mod agent_path_tests;
+
+/// Go's `Create`: resolve the provider, then the model, then build the client.
+///
+/// `env` stands in for `os.Getenv` so resolution is testable without touching the
+/// process environment.
+pub fn create(
+    options: &CreateOptions,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<AgentClient, ClientError> {
+    create_inner(options, env, None)
+}
+
+/// Go's `Create` with an injected PATH probe.
+pub fn create_with(
+    options: &CreateOptions,
+    env: &dyn Fn(&str) -> Option<String>,
+    on_path: &dyn Fn(&str) -> bool,
+) -> Result<AgentClient, ClientError> {
+    create_inner(options, env, Some(on_path))
+}
+
+fn create_inner(
+    options: &CreateOptions,
+    env: &dyn Fn(&str) -> Option<String>,
+    on_path: Option<&dyn Fn(&str) -> bool>,
+) -> Result<AgentClient, ClientError> {
+    let mut provider = if options.provider.is_empty() {
+        env("SYMERASEME_LLM_PROVIDER").unwrap_or_default()
+    } else {
+        options.provider.clone()
+    };
+    if provider.is_empty() {
+        provider = "anthropic".to_owned();
+    }
+    provider = provider.trim().to_lowercase();
+
+    let Some(spec) = provider_spec(&provider) else {
+        return Err(ClientError::UnknownProvider(ProviderError {
+            cause: LlmError::new(format!(
+                "unknown LLM provider {:?}. Known providers: {}",
+                provider,
+                list_available_providers().join(", ")
+            )),
+        }));
+    };
+
+    let model = if options.model.is_empty() {
+        env("SYMERASEME_LLM_MODEL")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| spec.default_model.to_owned())
+    } else {
+        options.model.clone()
+    };
+
+    if spec.kind == ProviderKind::Agent {
+        let agent_backend = if options.agent_backend.is_empty() {
+            env("SYMERASEME_AGENT_BACKEND").unwrap_or_default()
+        } else {
+            options.agent_backend.clone()
+        };
+        let client = match on_path {
+            Some(on_path) => {
+                AgentClient::with_probe(model, agent_backend, options.cost_tracker.clone(), on_path)
+            }
+            None => AgentClient::new(model, agent_backend, options.cost_tracker.clone()),
+        };
+        return Ok(client);
+    }
+
+    let base_url = if !options.base_url.is_empty() {
+        options.base_url.clone()
+    } else if let Some(value) = env(ENV_BASE_URL).filter(|value| !value.is_empty()) {
+        value
+    } else if provider == "ollama" {
+        env(ENV_OLLAMA_HOST)
+            .filter(|value| !value.is_empty())
+            .map(|value| format!("{}/v1", value.trim_end_matches('/')))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    transport::validate_provider_base_url(&provider, &base_url)?;
+    if provider == "openai-compatible" && base_url.is_empty() {
+        let detail = "llmkit: provider \"custom\" requires a base URL override (WithBaseURL)";
+        return Err(ClientError::Provider(LlmError::with_source(
+            format!("llmkit client for {provider:?}: {detail}"),
+            detail,
+        )));
+    }
+    let api_key = if !options.api_key.is_empty() {
+        Some(options.api_key.clone())
+    } else if !spec.env_key.is_empty() {
+        let Some(value) = env(spec.env_key).filter(|value| !value.is_empty()) else {
+            let detail = format!(
+                "llmkit: auth_failure: environment variable {} is not set (reference {})",
+                spec.env_key, spec.env_key
+            );
+            return Err(ClientError::Provider(LlmError::with_source(
+                format!("llmkit client for {provider:?}: {detail}"),
+                detail,
+            )));
+        };
+        Some(value)
+    } else {
+        None
+    };
+    let provider_client =
+        LlmkitClient::new(&provider, model.clone(), base_url, api_key, String::new())?;
+    Ok(AgentClient::with_llmkit(
+        model,
+        provider_client,
+        options.cost_tracker.clone(),
+    ))
+}
+
+const ENV_BASE_URL: &str = "SYMERASEME_LLM_BASE_URL";
+const ENV_OLLAMA_HOST: &str = "OLLAMA_HOST";
+
+#[cfg(all(test, unix))]
+#[path = "host_agent_tests.rs"]
+mod host_agent_tests;

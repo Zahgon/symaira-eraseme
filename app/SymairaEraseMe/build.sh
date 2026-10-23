@@ -18,15 +18,16 @@ swift build "$@"
 
 SWIFT_BIN_PATH="$(swift build --show-bin-path "$@")"
 PROJECT_ROOT="$(cd ../.. && pwd)"
-GO_VERSION_VALUE="${VERSION:-dev}"
-GO_BINARY="$SWIFT_BIN_PATH/symeraseme"
-echo "Building the self-contained Go MCP server..."
-(
-    cd "$PROJECT_ROOT"
-    CGO_ENABLED=0 go build -trimpath \
-        -ldflags "-s -w -X main.versionValue=$GO_VERSION_VALUE" \
-        -o "$GO_BINARY" ./cmd/symeraseme
-)
+if [ -n "${SYMERASEME_RUST_TEST_BINARY:-}" ]; then
+    test -x "$SYMERASEME_RUST_TEST_BINARY"
+    cp "$SYMERASEME_RUST_TEST_BINARY" "$SWIFT_BIN_PATH/symeraseme"
+else
+    PROFILE=debug
+    case " $* " in
+        *" -c release "*|*" --configuration release "*) PROFILE=release ;;
+    esac
+    "$PROJECT_ROOT/scripts/build-app-backends.sh" "$SWIFT_BIN_PATH" "$PROFILE"
+fi
 
 echo "Build successful!"
 echo "Run with: $SWIFT_BIN_PATH/SymairaEraseMe"

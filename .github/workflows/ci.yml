@@ -17,16 +17,106 @@ permissions:
   contents: read
 
 jobs:
+  icon-inputs:
+    name: Icon compile input selector
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.icon-inputs.outputs.run }}
+    steps:
+      - name: Checkout PR history for exact base/head comparison
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Classify icon compilation inputs
+        id: icon-inputs
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # ICON_INPUT_SELECTOR_BEGIN
+          set -euo pipefail
+          : "${BASE_SHA:?pull_request base SHA is required}"
+          : "${HEAD_SHA:?pull_request head SHA is required}"
+          : "${GITHUB_OUTPUT:?GitHub output file is required}"
+          : "${RUNNER_TEMP:?runner temp directory is required}"
+
+          for sha in "$BASE_SHA" "$HEAD_SHA"; do
+            if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+              printf 'Invalid pull_request commit SHA: %s\n' "$sha" >&2
+              exit 1
+            fi
+            if ! git cat-file -e "${sha}^{commit}"; then
+              printf 'Missing pull_request commit object: %s\n' "$sha" >&2
+              exit 1
+            fi
+          done
+
+          changed_paths="$(mktemp "$RUNNER_TEMP/icon-inputs.XXXXXX")"
+          trap 'rm -f "$changed_paths"' EXIT
+          if ! git diff --no-renames --name-only -z "$BASE_SHA" "$HEAD_SHA" > "$changed_paths"; then
+            printf 'Could not classify pull_request icon inputs.\n' >&2
+            exit 1
+          fi
+
+          run_icon_compile=false
+          while IFS= read -r -d '' path; do
+            case "$path" in
+              assets/branding/AppIcon.icon/*|\
+              assets/branding/AppIcon.icns|\
+              assets/branding/AppIcon.sha256|\
+              scripts/test-app-icon.sh|\
+              scripts/verify-app-icon.sh|\
+              .github/workflows/ci.yml)
+                run_icon_compile=true
+                break
+                ;;
+            esac
+          done < "$changed_paths"
+
+          printf 'run=%s\n' "$run_icon_compile" >> "$GITHUB_OUTPUT"
+          # ICON_INPUT_SELECTOR_END
+
+  icon-compile:
+    name: app icon compile
+    needs: [icon-inputs]
+    if: >-
+      always() &&
+      (github.event_name != 'pull_request' ||
+       needs.icon-inputs.result != 'success' ||
+       needs.icon-inputs.outputs.run != 'false')
+    runs-on: macos-26
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Select Xcode 26
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
+        with:
+          xcode-version: '26.4.1'
+      - name: Verify Xcode toolchain
+        run: |
+          set -euo pipefail
+          XCODE_VERSION="$(xcodebuild -version)"
+          echo "$XCODE_VERSION"
+          XCODE_MAJOR="${XCODE_VERSION#Xcode }"
+          XCODE_MAJOR="${XCODE_MAJOR%%.*}"
+          if ! [[ "$XCODE_MAJOR" =~ ^[0-9]+$ ]] || (( XCODE_MAJOR < 26 )); then
+            echo "::error::Expected Xcode 26 or newer, got: $XCODE_VERSION" >&2
+            exit 1
+          fi
+      - name: Compile and inspect native icon
+        run: ./scripts/test-app-icon.sh
+
   lint:
     name: lint
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: '1.26.6'
+      - name: Install pinned Rust lint tools
+        run: rustup toolchain install 1.98.0 --profile minimal --component rustfmt,clippy
       - name: Check formatting and lint
         run: |
           make fmt-check
@@ -38,15 +128,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26.6'
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install pinned Rust toolchains
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup toolchain install nightly-2026-09-20 --profile minimal --component miri,rust-src
       - name: Build and test
         run: |
           make build
           make test
-          make test-race
+          make miri
 
   schema-validate:
     name: schema-validate
@@ -54,14 +147,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: '1.26.6'
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.98.0 --profile minimal
       - name: Validate embedded registry
         run: |
           make build
           ./symeraseme registry validate
+      - name: Validate Rust migration task ownership
+        run: python3 tests/test_rust_task_graph.py
 
   vuln-scan:
     name: vuln-scan
@@ -69,12 +162,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: '1.26.6'
-      - name: Audit Go dependencies
-        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - name: Install pinned Rust audit tool
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal
+          cargo +1.98.0 install cargo-audit --version 0.22.2 --locked
+      - name: Audit Rust dependencies
+        run: |
+          cargo +1.98.0 audit --file Cargo.lock
+          cargo +1.98.0 audit --file fuzz/Cargo.lock
 
   secrets-scan:
     name: secrets-scan
@@ -84,8 +179,31 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
+      - name: Verify immutable fixture exceptions across full history
+        run: |
+          python3 scripts/check_frozen_secret_scan_scope.py
+          python3 tests/test_frozen_secret_scan_scope.py
       - name: TruffleHog secrets scan
-        uses: trufflesecurity/trufflehog@20652fbbdefffcdaa493a5bf57ab2ac6b1db715b # v3.97.1
+        uses: trufflesecurity/trufflehog@0186870afd2c4a90def791d80260923ba583d076 # v3.98.0
         with:
           path: ./
-          extra_args: --exclude-detectors Lob
+          # action.yml constructs IMAGE:VERSION; tag@digest keeps the
+          # 3.97.5 label while pinning the manifest immutably.
+          image: ghcr.io/trufflesecurity/trufflehog
+          version: '3.97.5@sha256:1cec88f18ca39e26e04e61fe9d886c9c4e5f2fc0ba4f2ed185cac0722bd8a076'
+          extra_args: --exclude-detectors Lob --exclude-paths .trufflehog-exclude-paths --fail-on-scan-errors
+      - name: TruffleHog protected-history scan
+        uses: trufflesecurity/trufflehog@0186870afd2c4a90def791d80260923ba583d076 # v3.98.0
+        with:
+          path: ./
+          image: ghcr.io/trufflesecurity/trufflehog
+          version: '3.97.5@sha256:1cec88f18ca39e26e04e61fe9d886c9c4e5f2fc0ba4f2ed185cac0722bd8a076'
+          # --since-commit excludes its base commit. Starting at the known
+          # fixture commit therefore scans the scanner-safe remediation and
+          # every later revision of the legacy test path omitted above.
+          base: fa366dcabb830af478c44c372c2ca40395654644
+          head: HEAD
+          extra_args: --exclude-detectors Lob --include-paths .trufflehog-include-paths --fail-on-scan-errors
+      - name: Verify protected-scope TruffleHog coverage
+        run: ./scripts/test-trufflehog-scope.sh

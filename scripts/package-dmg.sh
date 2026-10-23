@@ -3,6 +3,9 @@ set -euo pipefail
 
 # Make sure we are at the repository root
 cd "$(dirname "$0")/.."
+REPO_ROOT="$(pwd)"
+ICON_SOURCE="$REPO_ROOT/assets/branding/AppIcon.icon"
+ICNS_SOURCE="$REPO_ROOT/assets/branding/AppIcon.icns"
 
 # Product name with a space (display convention); technical SPM package and
 # target names stay unchanged.
@@ -12,6 +15,7 @@ APP_NAME="Symaira EraseMe"
 APP_ONLY="${APP_ONLY:-false}"
 DMG_ONLY="${DMG_ONLY:-false}"
 REQUIRE_SIGNING="${REQUIRE_SIGNING:-false}"
+REQUIRE_COMPILED_ICON="${REQUIRE_COMPILED_ICON:-false}"
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -69,9 +73,12 @@ if [ -z "${DEVELOPER_DIR:-}" ]; then
     fi
 fi
 
-STAGE_DIR="app/SymairaEraseMe/.build/dmg-stage"
+# Overridable so concurrent test processes do not share one staging directory
+# and race each other in asset-catalog/ICNS generation (#873).
+STAGE_DIR="${STAGE_DIR:-$REPO_ROOT/app/SymairaEraseMe/.build/dmg-stage}"
 APP_BUNDLE="$STAGE_DIR/$APP_NAME.app"
-DMG_PATH="dist/Symaira-EraseMe-${VERSION}-macos.dmg"
+DIST_DIR="${DIST_DIR:-$REPO_ROOT/dist}"
+DMG_PATH="$DIST_DIR/Symaira-EraseMe-${VERSION}-macos.dmg"
 
 CODESIGN_KEYCHAIN_ARGS=()
 if [ -n "${KEYCHAIN_PATH:-}" ] && [ -f "$KEYCHAIN_PATH" ]; then
@@ -81,26 +88,54 @@ fi
 if [ "$DMG_ONLY" != "true" ]; then
     echo "Building SymairaEraseMe in Release mode..."
     cd app/SymairaEraseMe
-    swift build -c release
-    SWIFT_BIN_PATH="$(swift build -c release --show-bin-path)"
+    swift build -c release --jobs "${SWIFT_BUILD_JOBS:-2}"
+    SWIFT_BIN_PATH="$(swift build -c release --jobs "${SWIFT_BUILD_JOBS:-2}" --show-bin-path)"
     cd ../..
 
     BUILD_DIR="$SWIFT_BIN_PATH"
 
-    echo "Building the self-contained Go MCP server..."
-    GO_BINARY="$BUILD_DIR/symeraseme"
-    CGO_ENABLED=0 go build -trimpath \
-        -ldflags "-s -w -X main.versionValue=$VERSION" \
-        -o "$GO_BINARY" ./cmd/symeraseme
+    echo "Building the self-contained Rust MCP server..."
+    "$REPO_ROOT/scripts/build-app-backends.sh" "$BUILD_DIR" release
 
     echo "Creating App Bundle structure..."
     rm -rf "$STAGE_DIR"
     mkdir -p "$APP_BUNDLE/Contents/MacOS"
     mkdir -p "$APP_BUNDLE/Contents/Resources"
+    cp -R "$ICON_SOURCE" "$APP_BUNDLE/Contents/Resources/AppIcon.icon"
+    cp "$ICNS_SOURCE" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+    if ACTOOL="$(xcrun --find actool 2>/dev/null || true)" && [ -n "$ACTOOL" ]; then
+        ICON_BUILD_DIR="$APP_BUNDLE/Contents/Resources/.AppIcon-compiled"
+        mkdir -p "$ICON_BUILD_DIR"
+        "$ACTOOL" \
+            --compile "$ICON_BUILD_DIR" \
+            --platform macosx \
+            --target-device mac \
+            --minimum-deployment-target 26.0 \
+            --app-icon AppIcon \
+            --include-all-app-icons \
+            --enable-on-demand-resources NO \
+            --development-region en \
+            --output-partial-info-plist "$ICON_BUILD_DIR/partial.plist" \
+            "$ICON_SOURCE" < /dev/null
+        if [ -f "$ICON_BUILD_DIR/Assets.car" ]; then
+            cp "$ICON_BUILD_DIR/Assets.car" "$APP_BUNDLE/Contents/Resources/Assets.car"
+        elif [ "$REQUIRE_COMPILED_ICON" = "true" ]; then
+            echo "Release requires a compiled Assets.car; actool produced none." >&2
+            exit 1
+        else
+            echo "Warning: actool produced no Assets.car; keeping the approved ICNS fallback only." >&2
+        fi
+        rm -rf "$ICON_BUILD_DIR"
+    elif [ "$REQUIRE_COMPILED_ICON" = "true" ]; then
+        echo "Release requires an Xcode 26+ actool that supports .icon; actool is unavailable." >&2
+        exit 1
+    else
+        echo "Warning: actool unavailable; keeping the approved ICNS fallback only." >&2
+    fi
 
-    echo "Copying Swift and Go binaries..."
+    echo "Copying Swift and Rust binaries..."
     cp "$BUILD_DIR/SymairaEraseMe" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
-    cp "$GO_BINARY" "$APP_BUNDLE/Contents/MacOS/symeraseme"
+    cp "$BUILD_DIR/symeraseme" "$APP_BUNDLE/Contents/MacOS/symeraseme"
     chmod 0755 "$APP_BUNDLE/Contents/MacOS/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/symeraseme"
     test -x "$APP_BUNDLE/Contents/MacOS/symeraseme"
 
@@ -113,6 +148,8 @@ if [ "$DMG_ONLY" != "true" ]; then
     <key>CFBundleExecutable</key>
     <string>$APP_NAME</string>
     <key>CFBundleIconFile</key>
+    <string>AppIcon.icns</string>
+    <key>CFBundleIconName</key>
     <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>com.symaira.eraseme</string>
@@ -134,28 +171,24 @@ if [ "$DMG_ONLY" != "true" ]; then
 </plist>
 EOF
 
-    SRC_ICON="assets/branding/AppIcon.icns"
-    if [ -f "$SRC_ICON" ]; then
-        echo "Installing AppIcon.icns..."
-        cp "$SRC_ICON" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
-    else
-        echo "Warning: $SRC_ICON not found. App will build without icon."
-    fi
+    # The approved icon is copied and guarded before signing; do not silently
+    # fall back to a stale legacy asset.
+    "$REPO_ROOT/scripts/verify-app-icon.sh" "$APP_BUNDLE"
 
     # --- Code Signing ---
     # Sign nested binary with hardened runtime, then sign app bundle with hardened runtime.
     if [ -n "${CODESIGN_IDENTITY:-}" ]; then
         echo "Signing app bundle with identity: $CODESIGN_IDENTITY"
-        # Go emits an ad-hoc linker signature. Remove it before applying the
-        # Developer ID signature so recursive app signing cannot retain it.
-        codesign --remove-signature "$APP_BUNDLE/Contents/MacOS/symeraseme" || true
-        codesign --force --timestamp --options runtime \
-            ${CODESIGN_KEYCHAIN_ARGS[@]+"${CODESIGN_KEYCHAIN_ARGS[@]}"} \
-            -s "$CODESIGN_IDENTITY" \
-            "$APP_BUNDLE/Contents/MacOS/symeraseme"
-        echo "Verifying nested Go binary signature before app signing..."
-        codesign --verify --strict --verbose=2 "$APP_BUNDLE/Contents/MacOS/symeraseme"
-        codesign -dvvv "$APP_BUNDLE/Contents/MacOS/symeraseme" 2>&1
+        # Sign the Rust backend before signing the containing app.
+        for backend in symeraseme; do
+            codesign --remove-signature "$APP_BUNDLE/Contents/MacOS/$backend" || true
+            codesign --force --timestamp --options runtime \
+                ${CODESIGN_KEYCHAIN_ARGS[@]+"${CODESIGN_KEYCHAIN_ARGS[@]}"} \
+                -s "$CODESIGN_IDENTITY" \
+                "$APP_BUNDLE/Contents/MacOS/$backend"
+            codesign --verify --strict --verbose=2 "$APP_BUNDLE/Contents/MacOS/$backend"
+            codesign -dvvv "$APP_BUNDLE/Contents/MacOS/$backend" 2>&1
+        done
         codesign --deep --force --timestamp --options runtime \
             ${CODESIGN_KEYCHAIN_ARGS[@]+"${CODESIGN_KEYCHAIN_ARGS[@]}"} \
             -s "$CODESIGN_IDENTITY" \
@@ -181,9 +214,11 @@ if [ ! -d "$APP_BUNDLE" ]; then
     exit 1
 fi
 
+scripts/verify-app-icon.sh "$APP_BUNDLE"
+
 echo "Creating DMG..."
-mkdir -p dist
-rm -f dist/SymairaEraseMe.dmg   # legacy unversioned name from older releases
+mkdir -p "$DIST_DIR"
+rm -f "$DIST_DIR/SymairaEraseMe.dmg"   # legacy unversioned name from older releases
 rm -f "$DMG_PATH"
 scripts/create-symaira-dmg.sh \
     "$APP_BUNDLE" \

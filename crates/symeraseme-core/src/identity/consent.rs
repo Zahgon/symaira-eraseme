@@ -1,0 +1,1070 @@
+//! File-backed destructive-operation consent tokens.
+//!
+//! The format is shared with the Go implementation: a token is stored in
+//! `consent_<sha256-prefix>.json`, with a JSON body containing the command,
+//! Unix timestamps, and the URL-safe token value.  The store keeps the clock
+//! and token source injectable so differential fixtures can be deterministic.
+
+use base64::Engine;
+use rand::Rng;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::fmt;
+use std::fs;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tempfile::Builder;
+
+/// Default token lifetime, matching the Go/Python implementations.
+pub const DEFAULT_TOKEN_TTL: i64 = 86_400;
+/// Permission for the consent directory on Unix-like systems.
+pub const CONSENT_DIR_MODE: u32 = 0o700;
+/// Permission for consent files on Unix-like systems.
+pub const CONSENT_FILE_MODE: u32 = 0o600;
+
+const TOKEN_BYTES: usize = 16;
+
+/// Errors returned by consent operations.
+#[derive(Debug)]
+pub enum ConsentError {
+    Io(io::Error),
+    Json(serde_json::Error),
+    NotFound,
+    Expired,
+    CommandMismatch,
+    Denied,
+}
+
+impl PartialEq for ConsentError {
+    fn eq(&self, other: &Self) -> bool {
+        matches!(
+            (self, other),
+            (Self::NotFound, Self::NotFound)
+                | (Self::Expired, Self::Expired)
+                | (Self::CommandMismatch, Self::CommandMismatch)
+                | (Self::Denied, Self::Denied)
+                | (Self::Io(_), Self::Io(_))
+                | (Self::Json(_), Self::Json(_))
+        )
+    }
+}
+
+impl Eq for ConsentError {}
+
+impl fmt::Display for ConsentError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(_) => formatter.write_str("identity: consent storage error"),
+            Self::Json(_) | Self::NotFound => {
+                formatter.write_str("identity: consent token not found")
+            }
+            Self::Expired => formatter.write_str("identity: consent token expired"),
+            Self::CommandMismatch => {
+                formatter.write_str("identity: consent token command mismatch")
+            }
+            Self::Denied => formatter.write_str("identity: consent denied"),
+        }
+    }
+}
+
+impl std::error::Error for ConsentError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::Json(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<io::Error> for ConsentError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl From<serde_json::Error> for ConsentError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Json(error)
+    }
+}
+
+/// On-disk representation. `token` is omitted only for legacy v1 files.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ConsentRecord {
+    pub command: String,
+    pub issued_at: i64,
+    pub expires_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+}
+
+/// Public summary returned by [`ConsentStore::list_tokens`].
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ConsentToken {
+    pub token: String,
+    pub command: String,
+    pub issued_at: i64,
+    pub expires_at: i64,
+}
+
+/// Options for the Go-compatible `grant` operation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GrantOptions {
+    #[serde(default = "default_grant_command")]
+    pub command: String,
+    #[serde(default = "default_grant_ttl")]
+    pub ttl: i64,
+    #[serde(default)]
+    pub dry_run: bool,
+    #[serde(default)]
+    pub list_tokens: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoke: Option<String>,
+    #[serde(default)]
+    pub revoke_all: bool,
+}
+
+fn default_grant_command() -> String {
+    "execute".to_owned()
+}
+
+const fn default_grant_ttl() -> i64 {
+    DEFAULT_TOKEN_TTL
+}
+
+impl Default for GrantOptions {
+    fn default() -> Self {
+        Self {
+            command: default_grant_command(),
+            ttl: default_grant_ttl(),
+            dry_run: false,
+            list_tokens: false,
+            revoke: None,
+            revoke_all: false,
+        }
+    }
+}
+
+/// JSON result shapes returned by the Go `grant` contract.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum GrantOutcome {
+    List {
+        count: usize,
+        success: bool,
+        tokens: Vec<ConsentToken>,
+    },
+    DryRun {
+        command: String,
+        dry_run: bool,
+        revoke: String,
+        revoke_all: bool,
+        success: bool,
+    },
+    RevokeAll {
+        revoke_all: bool,
+        revoked: usize,
+        success: bool,
+    },
+    RevokeOne {
+        revoked: usize,
+        success: bool,
+    },
+    Issue {
+        success: bool,
+        token: String,
+    },
+}
+
+type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
+type RandomSource = Arc<dyn Fn(usize) -> Result<Vec<u8>, ConsentError> + Send + Sync>;
+
+/// A consent store rooted at one directory.
+#[derive(Clone)]
+pub struct ConsentStore {
+    directory: PathBuf,
+    clock: Clock,
+    random: RandomSource,
+}
+
+impl fmt::Debug for ConsentStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ConsentStore")
+            .field("directory", &self.directory)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ConsentStore {
+    /// Create a store rooted at `directory`.
+    pub fn new(directory: impl Into<PathBuf>) -> Self {
+        Self {
+            directory: directory.into(),
+            clock: Arc::new(|| {
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|duration| duration.as_secs() as i64)
+                    .unwrap_or_default()
+            }),
+            random: Arc::new(|length| {
+                let mut bytes = vec![0_u8; length];
+                rand::rng().fill_bytes(&mut bytes);
+                Ok(bytes)
+            }),
+        }
+    }
+
+    /// Construct a store using the platform/configured data directory.
+    pub fn from_default_directory() -> io::Result<Self> {
+        Ok(Self::new(default_consent_directory()?))
+    }
+
+    /// Replace the clock for deterministic fixtures.
+    pub fn with_clock(mut self, clock: impl Fn() -> i64 + Send + Sync + 'static) -> Self {
+        self.clock = Arc::new(clock);
+        self
+    }
+
+    /// Replace the random source for deterministic fixtures.
+    pub fn with_random_source(
+        mut self,
+        random: impl Fn(usize) -> Result<Vec<u8>, ConsentError> + Send + Sync + 'static,
+    ) -> Self {
+        self.random = Arc::new(random);
+        self
+    }
+
+    /// Issue and atomically persist a token for `command`.
+    pub fn issue_token(&self, command: &str, ttl: i64) -> Result<String, ConsentError> {
+        let ttl = if ttl <= 0 { DEFAULT_TOKEN_TTL } else { ttl };
+        self.ensure_directory()?;
+        let bytes = (self.random)(TOKEN_BYTES)?;
+        if bytes.len() != TOKEN_BYTES {
+            return Err(ConsentError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "consent token source returned an invalid length",
+            )));
+        }
+        let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let now = (self.clock)();
+        let record = ConsentRecord {
+            command: command.to_owned(),
+            issued_at: now,
+            expires_at: now.saturating_add(ttl),
+            token: Some(token.clone()),
+        };
+        let body = serde_json::to_vec(&record)?;
+        atomic_write(&self.path_for_token(&token), &body)?;
+        Ok(token)
+    }
+
+    /// Verify a token for a command. Expired files are removed.
+    pub fn verify_token(&self, command: &str, token: &str) -> Result<(), ConsentError> {
+        if token.is_empty() {
+            return Err(ConsentError::NotFound);
+        }
+        self.ensure_directory()?;
+        let path = self.find_token_file(token)?;
+        let body = fs::read(&path).map_err(|_| ConsentError::NotFound)?;
+        let record: ConsentRecord =
+            serde_json::from_slice(&body).map_err(|_| ConsentError::NotFound)?;
+        if let Some(stored) = &record.token
+            && stored != token
+        {
+            return Err(ConsentError::NotFound);
+        }
+        if record.command != command {
+            return Err(ConsentError::CommandMismatch);
+        }
+        if (self.clock)() > record.expires_at {
+            let _ = fs::remove_file(path);
+            return Err(ConsentError::Expired);
+        }
+        // Go hardens existing validated records on a best-effort basis.
+        let _ = tighten_permissions(&path);
+        Ok(())
+    }
+
+    /// Serialize authorization on the existing token inode across processes.
+    pub(super) fn lock_token(&self, token: &str) -> Result<fs::File, ConsentError> {
+        let path = self.find_token_file(token)?;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|error| match error.kind() {
+                io::ErrorKind::NotFound => ConsentError::NotFound,
+                _ => ConsentError::Io(error),
+            })?;
+        file.lock()?;
+        Ok(file)
+    }
+
+    /// Remove a token after successful use. Missing tokens are ignored.
+    pub fn consume_token(&self, token: &str) -> Result<(), ConsentError> {
+        self.consume_token_with(token, fs::remove_file)
+    }
+
+    fn consume_token_with(
+        &self,
+        token: &str,
+        remove: impl FnOnce(PathBuf) -> io::Result<()>,
+    ) -> Result<(), ConsentError> {
+        if token.is_empty() {
+            return Ok(());
+        }
+        self.ensure_directory()?;
+        match self.find_token_file(token) {
+            Ok(path) => match remove(path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error.into()),
+            },
+            Err(ConsentError::NotFound) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Revoke a token, returning whether a file was removed.
+    pub fn revoke_token(&self, token: &str) -> Result<bool, ConsentError> {
+        self.revoke_token_with(token, fs::remove_file)
+    }
+
+    fn revoke_token_with(
+        &self,
+        token: &str,
+        remove: impl FnOnce(PathBuf) -> io::Result<()>,
+    ) -> Result<bool, ConsentError> {
+        if token.is_empty() {
+            return Ok(false);
+        }
+        self.ensure_directory()?;
+        let path = match self.find_token_file(token) {
+            Ok(path) => path,
+            Err(ConsentError::NotFound) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        match remove(path) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// List valid tokens in issued-at order and prune expired records.
+    pub fn list_tokens(&self) -> Result<Vec<ConsentToken>, ConsentError> {
+        self.ensure_directory()?;
+        let now = (self.clock)();
+        let mut tokens = Vec::new();
+        // Go's `os.ReadDir` answers filename order; the sort below is stable,
+        // so files issued in the same second keep it.
+        let mut names = Vec::new();
+        for entry in fs::read_dir(&self.directory)? {
+            let entry = entry?;
+            if entry.file_type()?.is_file() {
+                names.push(entry.file_name());
+            }
+        }
+        names.sort();
+        for name in &names {
+            let name = name.to_string_lossy();
+            if !name.starts_with("consent_") || !name.ends_with(".json") {
+                continue;
+            }
+            let path = self.directory.join(name.as_ref());
+            let body = match fs::read(&path) {
+                Ok(body) => body,
+                Err(_) => continue,
+            };
+            let record: ConsentRecord = match serde_json::from_slice(&body) {
+                Ok(record) => record,
+                Err(_) => continue,
+            };
+            if now > record.expires_at {
+                let _ = fs::remove_file(path);
+                continue;
+            }
+            let _ = tighten_permissions(&path);
+            let token = record.token.unwrap_or_else(|| {
+                name.trim_start_matches("consent_")
+                    .trim_end_matches(".json")
+                    .to_owned()
+            });
+            tokens.push(ConsentToken {
+                token,
+                command: record.command,
+                issued_at: record.issued_at,
+                expires_at: record.expires_at,
+            });
+        }
+        // Go reads the directory in name order and then sorts by issue time,
+        // so files issued in the same second keep their filename order.
+        tokens.sort_by_key(|token| token.issued_at);
+        Ok(tokens)
+    }
+
+    /// Execute the Go-compatible `grant` decision order without CLI wiring.
+    pub fn grant(&self, options: &GrantOptions) -> Result<GrantOutcome, ConsentError> {
+        if options.list_tokens {
+            let tokens = self.list_tokens()?;
+            let count = tokens.len();
+            return Ok(GrantOutcome::List {
+                success: true,
+                tokens,
+                count,
+            });
+        }
+        let revoke = options.revoke.as_deref().unwrap_or_default();
+        if options.dry_run {
+            return Ok(GrantOutcome::DryRun {
+                success: true,
+                dry_run: true,
+                command: options.command.clone(),
+                revoke: revoke.to_owned(),
+                revoke_all: options.revoke_all,
+            });
+        }
+        if options.revoke_all {
+            let tokens = self.list_tokens()?;
+            let mut revoked = 0;
+            for token in tokens {
+                if self.revoke_token(&token.token)? {
+                    revoked += 1;
+                }
+            }
+            return Ok(GrantOutcome::RevokeAll {
+                success: true,
+                revoked,
+                revoke_all: true,
+            });
+        }
+        if !revoke.is_empty() {
+            if !self.revoke_token(revoke)? {
+                return Err(ConsentError::NotFound);
+            }
+            return Ok(GrantOutcome::RevokeOne {
+                success: true,
+                revoked: 1,
+            });
+        }
+        let token = self.issue_token(&options.command, options.ttl)?;
+        Ok(GrantOutcome::Issue {
+            success: true,
+            token,
+        })
+    }
+
+    fn ensure_directory(&self) -> io::Result<()> {
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(CONSENT_DIR_MODE);
+        }
+        builder.create(&self.directory).map_err(|error| {
+            // Go MkdirAll reports ENOTDIR for an existing file at the leaf;
+            // Rust's recursive builder reports EEXIST on Unix instead.
+            directory_create_error(error, || {
+                fs::metadata(&self.directory).is_ok_and(|metadata| !metadata.is_dir())
+            })
+        })?;
+        // MkdirAll uses 0700 for every new ancestor; only the requested
+        // directory is subsequently hardened, ignoring chmod errors in Go.
+        let _ = tighten_permissions(&self.directory);
+        Ok(())
+    }
+
+    fn path_for_token(&self, token: &str) -> PathBuf {
+        self.directory.join(token_filename(token))
+    }
+
+    fn find_token_file(&self, token: &str) -> Result<PathBuf, ConsentError> {
+        self.find_token_file_with(token, |from, to| fs::rename(from, to))
+    }
+
+    fn find_token_file_with(
+        &self,
+        token: &str,
+        rename: impl FnOnce(&Path, &Path) -> io::Result<()>,
+    ) -> Result<PathBuf, ConsentError> {
+        let hashed = self.path_for_token(token);
+        if hashed.is_file() {
+            return Ok(hashed);
+        }
+        let legacy = self.directory.join(format!("consent_{token}.json"));
+        if legacy.parent() != Some(self.directory.as_path()) || !legacy.is_file() {
+            return Err(ConsentError::NotFound);
+        }
+        let destination = self.path_for_token(token);
+        match rename(&legacy, &destination) {
+            Ok(()) => Ok(destination),
+            Err(_) if destination.is_file() => Ok(destination),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Err(ConsentError::NotFound),
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+/// Return the configured default data directory used for consent files.
+pub fn default_consent_directory() -> io::Result<PathBuf> {
+    let home = consent_home_from_environment(
+        std::env::var_os("HOME"),
+        std::env::var_os("USERPROFILE"),
+        cfg!(windows),
+    );
+    consent_directory_from(std::env::var("SYMERASEME_DATA_DIR").ok(), home.as_deref())
+}
+
+fn consent_home_from_environment(
+    home: Option<std::ffi::OsString>,
+    userprofile: Option<std::ffi::OsString>,
+    windows: bool,
+) -> Option<PathBuf> {
+    let value = if windows { userprofile } else { home }?;
+    if value.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(value))
+    }
+}
+
+fn consent_directory_from(data_dir: Option<String>, home: Option<&Path>) -> io::Result<PathBuf> {
+    if let Some(value) = data_dir.filter(|value| !value.is_empty()) {
+        return expand_home(value, home);
+    }
+    let home =
+        home.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "home directory unavailable"))?;
+    Ok(home.join(".local/share/symeraseme"))
+}
+
+fn expand_home(value: String, home: Option<&Path>) -> io::Result<PathBuf> {
+    if value == "~" {
+        return home
+            .map(Path::to_path_buf)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "home directory unavailable"));
+    }
+    if let Some(rest) = value.strip_prefix("~/") {
+        return home
+            .map(|home| home.join(rest))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "home directory unavailable"));
+    }
+    Ok(PathBuf::from(value))
+}
+
+fn token_filename(token: &str) -> String {
+    let digest = Sha256::digest(token.as_bytes());
+    let hex = digest
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("consent_{hex}.json")
+}
+
+fn atomic_write(path: &Path, body: &[u8]) -> io::Result<()> {
+    atomic_write_with(
+        path,
+        body,
+        fs::File::sync_all,
+        |file| {
+            close_file(file, |file| {
+                #[cfg(unix)]
+                {
+                    // Transfer the owner once; retain native EINTR and other errors.
+                    nix::unistd::close(file).map_err(io::Error::from)
+                }
+                #[cfg(windows)]
+                {
+                    close_windows_file(file)
+                }
+                #[cfg(not(any(unix, windows)))]
+                {
+                    drop(file);
+                    Ok(())
+                }
+            })
+        },
+        chmod_temporary,
+    )
+}
+
+// Operation-local seams keep failure tests deterministic without global hooks.
+fn atomic_write_with(
+    path: &Path,
+    body: &[u8],
+    sync: impl FnOnce(&fs::File) -> io::Result<()>,
+    close: impl FnOnce(fs::File) -> io::Result<()>,
+    chmod: impl FnOnce(&Path) -> io::Result<()>,
+) -> io::Result<()> {
+    let directory = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "consent path has no parent"))?;
+    let mut temporary = Builder::new()
+        .prefix(".consent-")
+        .suffix(".tmp")
+        .tempfile_in(directory)?;
+    temporary.write_all(body)?;
+    // Retain the existing fail-closed Rust guard. Go has no sync call:
+    // this is an explicit ID-005 difference, not normalized oracle parity.
+    sync(temporary.as_file())?;
+    // Go closes before chmod/rename.
+    // Keep the path guard alive so every pre-rename failure removes our temp.
+    let (file, temporary) = temporary.into_parts();
+    close(file)?;
+    chmod(&temporary)?;
+    temporary
+        .persist(path)
+        .map(|_| ())
+        .map_err(|error| error.error)
+}
+
+fn close_file(file: fs::File, close: impl FnOnce(fs::File) -> io::Result<()>) -> io::Result<()> {
+    // Keep this operation-local boundary fallible. Native close operations
+    // remain unchanged; a failed close must prevent chmod and publication.
+    close(file)
+}
+
+fn directory_create_error(error: io::Error, is_file: impl FnOnce() -> bool) -> io::Error {
+    if error.kind() == io::ErrorKind::AlreadyExists && is_file() {
+        io::Error::from(io::ErrorKind::NotADirectory)
+    } else {
+        error
+    }
+}
+
+#[cfg(windows)]
+fn close_windows_file(file: fs::File) -> io::Result<()> {
+    use std::os::windows::io::IntoRawHandle;
+
+    let handle = file.into_raw_handle();
+    // SAFETY: `file` owns this live handle. Consuming it above transfers its
+    // sole ownership here; CloseHandle is called exactly once and no `File`
+    // drop can close or reuse the handle afterward.
+    checked_windows_close(handle)
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn checked_windows_close(handle: windows_sys::Win32::Foundation::HANDLE) -> io::Result<()> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    // SAFETY: CloseHandle validates the opaque kernel handle. Production
+    // transfers one live owner above; the native negative control supplies
+    // a null handle without constructing a stale owned File.
+    if unsafe { CloseHandle(handle) } != 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+fn chmod_temporary(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // The temporary entry is a file. Apply the required mode directly,
+        // matching Go's checked Chmod without an extra metadata failure path.
+        fs::set_permissions(path, fs::Permissions::from_mode(CONSENT_FILE_MODE))
+    }
+    #[cfg(not(unix))]
+    tighten_permissions(path)
+}
+
+fn tighten_permissions(path: &Path) -> io::Result<()> {
+    let metadata = fs::metadata(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = metadata.permissions();
+        let mode = if metadata.is_dir() {
+            CONSENT_DIR_MODE
+        } else {
+            CONSENT_FILE_MODE
+        };
+        permissions.set_mode(mode);
+        fs::set_permissions(path, permissions)?;
+    }
+    #[cfg(windows)]
+    #[allow(clippy::permissions_set_readonly_false)]
+    {
+        // Go's os.Chmod on Windows maps the owner-write bit to read-only.
+        // POSIX modes/ACL equivalence require separate native evidence.
+        let mut permissions = metadata.permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(path, permissions)?;
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = metadata;
+    }
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
+#[path = "consent_filesystem_tests.rs"]
+mod filesystem_tests;
+
+#[cfg(test)]
+#[path = "consent_portable_tests.rs"]
+mod portable_filesystem_tests;
+
+#[cfg(all(test, windows))]
+#[path = "consent_windows_tests.rs"]
+mod windows_filesystem_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn directory_error_translation_preserves_unrelated_errors_without_a_probe() {
+        for kind in [io::ErrorKind::PermissionDenied, io::ErrorKind::Interrupted] {
+            let error = directory_create_error(io::Error::new(kind, "original error"), || {
+                panic!("unrelated errors must not probe the path")
+            });
+            assert_eq!(error.kind(), kind);
+            assert_eq!(error.to_string(), "original error");
+        }
+        assert_eq!(
+            directory_create_error(io::Error::from(io::ErrorKind::AlreadyExists), || true).kind(),
+            io::ErrorKind::NotADirectory
+        );
+        assert_eq!(
+            directory_create_error(io::Error::from(io::ErrorKind::AlreadyExists), || false).kind(),
+            io::ErrorKind::AlreadyExists
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_kernel_close_error_prevents_token_replacement_and_keeps_the_old_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("consent-existing.json");
+        fs::write(&path, b"original consent sentinel").unwrap();
+        let mut closes = 0;
+        let error = atomic_write_with(
+            &path,
+            b"replacement",
+            fs::File::sync_all,
+            |file| {
+                close_file(file, |file| {
+                    // Close the valid owned file once. Then inject a real kernel
+                    // EBADF result using -1, without constructing a stale owner.
+                    nix::unistd::close(file).map_err(io::Error::from)?;
+                    closes += 1;
+                    nix::unistd::close(-1).map_err(io::Error::from)
+                })
+            },
+            |_| panic!("chmod must not follow a failed close"),
+        )
+        .unwrap_err();
+        assert_eq!(closes, 1);
+        assert_eq!(error.raw_os_error(), Some(nix::libc::EBADF));
+        assert_eq!(fs::read(&path).unwrap(), b"original consent sentinel");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    fn store(directory: &Path) -> ConsentStore {
+        ConsentStore::new(directory)
+            .with_clock(|| 1_000_000)
+            .with_random_source(|length| Ok((0..length).map(|value| value as u8).collect()))
+    }
+
+    #[test]
+    fn windows_consent_directory_uses_userprofile() {
+        use std::ffi::OsString;
+
+        let home = consent_home_from_environment(
+            Some(OsString::from("/unix/home")),
+            Some(OsString::from("/windows/profile")),
+            true,
+        );
+        assert_eq!(
+            consent_directory_from(None, home.as_deref()).unwrap(),
+            PathBuf::from("/windows/profile/.local/share/symeraseme")
+        );
+        assert_eq!(
+            consent_directory_from(Some("~/custom-data".to_owned()), home.as_deref()).unwrap(),
+            PathBuf::from("/windows/profile/custom-data")
+        );
+    }
+
+    #[test]
+    fn default_consent_directory_requires_home_instead_of_using_an_empty_path() {
+        assert_eq!(
+            consent_directory_from(None, None).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            expand_home("~/data".to_owned(), None).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+    }
+
+    #[test]
+    fn issue_has_deterministic_token_name_and_json() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = store(directory.path());
+        let token = store.issue_token("send-removal", 3_600).unwrap();
+        let expected =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode((0_u8..16).collect::<Vec<_>>());
+        assert_eq!(token, expected);
+        let path = directory.path().join(token_filename(&token));
+        assert!(path.is_file());
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            format!(
+                r#"{{"command":"send-removal","issued_at":1000000,"expires_at":1003600,"token":"{expected}"}}"#
+            )
+        );
+    }
+
+    #[test]
+    fn verify_command_expiry_and_single_use() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = store(directory.path());
+        let token = store.issue_token("send-removal", 3_600).unwrap();
+        assert_eq!(store.verify_token("send-removal", &token), Ok(()));
+        assert_eq!(
+            store.verify_token("other", &token),
+            Err(ConsentError::CommandMismatch)
+        );
+        let expired = store.clone().with_clock(|| 1_003_601);
+        assert_eq!(
+            expired.verify_token("send-removal", &token),
+            Err(ConsentError::Expired)
+        );
+        assert_eq!(store.consume_token(&token), Ok(()));
+        assert_eq!(
+            store.verify_token("send-removal", &token),
+            Err(ConsentError::NotFound)
+        );
+        assert_eq!(store.consume_token(&token), Ok(()));
+    }
+
+    #[test]
+    fn removal_races_ignore_only_missing_files_and_preserve_other_errors() {
+        for revoke in [false, true] {
+            for missing in [false, true] {
+                let directory = tempfile::tempdir().unwrap();
+                let store = store(directory.path());
+                let token = store.issue_token("delete", 60).unwrap();
+                let original = directory.path().join(token_filename(&token));
+                let original_bytes = fs::read(&original).unwrap();
+                // Replace/remove the real file between lookup and the actual
+                // removal syscall. No scheduler timing or permissions needed.
+                let remove = |path: PathBuf| {
+                    assert_eq!(path, original);
+                    fs::remove_file(&path).unwrap();
+                    if !missing {
+                        fs::create_dir(&path).unwrap();
+                        fs::write(path.join("sentinel"), &original_bytes).unwrap();
+                    }
+                    fs::remove_file(path)
+                };
+                let result = if revoke {
+                    store.revoke_token_with(&token, remove).map(|removed| {
+                        assert!(!removed, "another owner already removed the file");
+                    })
+                } else {
+                    store.consume_token_with(&token, remove)
+                };
+                if missing {
+                    assert_eq!(result, Ok(()));
+                    assert!(!original.exists());
+                } else {
+                    assert!(matches!(result, Err(ConsentError::Io(_))));
+                    assert_eq!(fs::read(original.join("sentinel")).unwrap(), original_bytes);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_rename_races_require_a_regular_destination_and_classify_missing() {
+        for destination_kind in ["file", "directory", "missing"] {
+            let directory = tempfile::tempdir().unwrap();
+            let store = store(directory.path());
+            let token = "legacy-race";
+            let legacy = directory.path().join(format!("consent_{token}.json"));
+            fs::write(&legacy, b"original legacy").unwrap();
+            let destination = directory.path().join(token_filename(token));
+            let result = store.find_token_file_with(token, |from, to| {
+                assert_eq!(from, legacy);
+                assert_eq!(to, destination);
+                if destination_kind == "missing" {
+                    fs::remove_file(from).unwrap();
+                    fs::rename(from, to)
+                } else {
+                    if destination_kind == "file" {
+                        fs::write(to, b"other owner's file").unwrap();
+                        fs::remove_file(from).unwrap();
+                    } else {
+                        fs::create_dir(to).unwrap();
+                    }
+                    // A failed OS rename can leave a concurrently published
+                    // destination. Only a real regular file is a fallback.
+                    fs::rename(from, to)
+                }
+            });
+            match destination_kind {
+                "file" => {
+                    assert_eq!(result.unwrap(), destination);
+                    assert_eq!(fs::read(&destination).unwrap(), b"other owner's file");
+                    assert!(!legacy.exists());
+                }
+                "directory" => {
+                    assert!(matches!(result, Err(ConsentError::Io(error))
+                        if error.raw_os_error().is_some()));
+                    assert!(destination.is_dir());
+                    assert_eq!(fs::read(&legacy).unwrap(), b"original legacy");
+                }
+                "missing" => assert_eq!(result, Err(ConsentError::NotFound)),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_file_is_migrated_and_listed() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConsentStore::new(directory.path()).with_clock(|| 150);
+        let token = "legacy-token";
+        let path = directory.path().join(format!("consent_{token}.json"));
+        fs::write(
+            &path,
+            r#"{"command":"delete","issued_at":100,"expires_at":200}"#,
+        )
+        .unwrap();
+        assert_eq!(store.verify_token("delete", token), Ok(()));
+        assert!(!path.exists());
+        assert!(directory.path().join(token_filename(token)).exists());
+    }
+
+    #[test]
+    fn list_prunes_expired_and_ignores_malformed() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = store(directory.path());
+        let fresh = store.issue_token("fresh", 100).unwrap();
+        let expired = store.clone().with_clock(|| 2_000_001);
+        expired.issue_token("expired", 1).unwrap();
+        fs::write(directory.path().join("consent_bad.json"), b"{").unwrap();
+        let listed = expired.list_tokens().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].token, fresh);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_permissions_are_restricted_on_unix() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = store(directory.path());
+        let token = store.issue_token("delete", 60).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let dir_mode = fs::metadata(directory.path()).unwrap().permissions().mode() & 0o777;
+        let file_mode = fs::metadata(directory.path().join(token_filename(&token)))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir_mode, CONSENT_DIR_MODE);
+        assert_eq!(file_mode, CONSENT_FILE_MODE);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn readonly_permission_is_cleared_on_windows() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("consent.tmp");
+        fs::write(&path, b"consent").unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&path, permissions).unwrap();
+        assert!(fs::metadata(&path).unwrap().permissions().readonly());
+
+        tighten_permissions(&path).unwrap();
+
+        assert!(!fs::metadata(&path).unwrap().permissions().readonly());
+    }
+
+    #[allow(dead_code)]
+    fn _fixed_clock_is_not_wall_clock() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    }
+
+    /// The wall-clock helper really reads the system clock, unlike the fixed
+    /// clocks the deterministic tests inject.
+    #[test]
+    fn wall_clock_helper_reads_a_real_instant() {
+        let now = _fixed_clock_is_not_wall_clock();
+        assert!(
+            now > 1_600_000_000,
+            "expected a post-2020 instant, got {now}"
+        );
+    }
+
+    /// An empty HOME counts as no HOME at all — Go never resolves a consent
+    /// directory from an empty string.
+    #[test]
+    fn consent_home_treats_an_empty_home_as_missing() {
+        use std::ffi::OsString;
+
+        assert_eq!(
+            consent_home_from_environment(Some(OsString::new()), None, false),
+            None
+        );
+        assert_eq!(
+            consent_home_from_environment(Some(OsString::from("/home/person")), None, false),
+            Some(PathBuf::from("/home/person"))
+        );
+        assert_eq!(consent_home_from_environment(None, None, false), None);
+    }
+
+    /// MkdirAll's fail-closed contract: a file obstructing the consent path
+    /// reports ENOTDIR — Rust's EEXIST at the leaf is translated, a file above
+    /// the leaf propagates the raw kernel error.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_directory_reports_not_a_directory_for_file_obstructions() {
+        use std::io::ErrorKind;
+
+        let directory = tempfile::tempdir().expect("tempdir");
+
+        let leaf_file = directory.path().join("consent-as-file");
+        fs::write(&leaf_file, b"x").expect("file at the leaf");
+        let leaf_error = ConsentStore::new(&leaf_file)
+            .list_tokens()
+            .expect_err("a file at the consent path must fail closed");
+        let ConsentError::Io(error) = leaf_error else {
+            panic!("expected an I/O error, got {leaf_error:?}");
+        };
+        assert_eq!(error.kind(), ErrorKind::NotADirectory);
+        assert_eq!(
+            error.raw_os_error(),
+            None,
+            "the leaf EEXIST is translated to a synthetic NotADirectory"
+        );
+
+        let parent_file = directory.path().join("parent-as-file");
+        fs::write(&parent_file, b"x").expect("file above the leaf");
+        let nested_error = ConsentStore::new(parent_file.join("consent"))
+            .list_tokens()
+            .expect_err("a file above the consent path must fail closed");
+        let ConsentError::Io(error) = nested_error else {
+            panic!("expected an I/O error, got {nested_error:?}");
+        };
+        assert_eq!(error.kind(), ErrorKind::NotADirectory);
+        assert!(
+            error.raw_os_error().is_some(),
+            "the raw ENOTDIR from the kernel is propagated unchanged"
+        );
+    }
+}

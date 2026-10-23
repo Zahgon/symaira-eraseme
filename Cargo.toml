@@ -1,0 +1,68 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/symeraseme-core",
+    "crates/symeraseme-engine",
+    "crates/symeraseme-cli",
+    "rust-tests/parity",
+]
+exclude = ["fuzz"]
+
+[workspace.package]
+version = "0.14.1"
+edition = "2024"
+rust-version = "1.98"
+authors = ["Daniel Justus"]
+description = "Privacy-first data broker removal automation"
+license = "Apache-2.0"
+repository = "https://github.com/danieljustus/symaira-eraseme"
+
+[workspace.dependencies]
+aes = "0.9.3"
+aes-gcm = "=0.11.1"
+base64 = "0.23.1"
+cap-fs-ext = "4.0.3"
+cap-std = "4.0.3"
+cbc = "0.2.1"
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+crypto-common = { version = "0.2.2", features = ["zeroize"] }
+http = "1.5.0"
+http-body-util = "0.1.3"
+hyper = { version = "1.7.0", features = ["http1", "server"] }
+hyper-util = { version = "0.1.17", features = ["tokio"] }
+flate2 = "1.1.10"
+hmac = { version = "0.13.0", features = ["zeroize"] }
+rusqlite = { version = "=0.40.2", default-features = false, features = ["backup", "bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+serde_yaml = { package = "yaml_serde", version = "=0.10.7" }
+symaira-core-version = { version = "=0.0.0", git = "https://github.com/danieljustus/symaira-corekit", rev = "27177f25f551cecefa7bd6c4524abf175b3a75c7" }
+symaira-core-sqlite = { version = "=0.0.0", git = "https://github.com/danieljustus/symaira-corekit", rev = "0f441fb27872da7edd65244e4fcbd0890f0b7174" }
+symaira-core-llm = { version = "=0.0.0", git = "https://github.com/danieljustus/symaira-corekit", rev = "04d1411adb57aa602b992509121011aa7666ff1a" }
+tar = "0.4.44"
+tempfile = "3.27.0"
+toml = "1.1.0"
+rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }
+ureq = { version = "=3.4.1", default-features = false, features = ["rustls"] }
+yaml-rust2 = "0.13.0"
+minijinja = { version = "2.24.0", default-features = false, features = ["builtins", "fuel", "serde", "std_collections"] }
+pbkdf2 = { version = "0.13.0", features = ["hmac"] }
+regex = "1.11.3"
+sha2 = "0.11.0"
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-native-certs = "0.8.4"
+hex = "0.4.3"
+rand = "0.10.2"
+signal-hook = "0.4.4"
+scrypt = "0.12.0"
+subtle = "2.6.1"
+tokio = { version = "1.48.0", features = ["macros", "net", "rt-multi-thread", "time"] }
+zeroize = "1.8.2"
+keyring = "3.6.3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

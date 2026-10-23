@@ -44,7 +44,7 @@ Activate this rule when the user wants to:
 1. **Setup**: `symeraseme init-profile`
 2. **Plan**: `symeraseme plan create --campaign initial --max 5`
 3. **Review**: `symeraseme plan show`
-4. **Execute**: `symeraseme execute --campaign initial --batch-size 5`
+4. **Execute**: `symeraseme plan execute --campaign initial --batch-size 5 --consent <token>`
 5. **Triage**: `symeraseme poll-inbox && symeraseme classify-reply`
 6. **Tick**: `symeraseme tick`
 7. **Re-scan**: Quarterly with new campaign IDs
@@ -53,7 +53,7 @@ Activate this rule when the user wants to:
 
 - `symeraseme init-profile` — Create identity
 - `symeraseme plan create --campaign <id>` — Plan campaign
-- `symeraseme execute --campaign <id>` — Send requests (needs consent)
+- `symeraseme plan execute --campaign <id> --consent <token>` — Run the plan; the Rust-only candidate has no outbound email/browser adapters by default
 - `symeraseme tick` — Check deadlines
 - `symeraseme poll-inbox` — Fetch replies
 - `symeraseme classify-reply <id>` — Classify with LLM
@@ -69,7 +69,8 @@ Activate this rule when the user wants to:
 
 ## Environment
 
-Requires: `ANTHROPIC_API_KEY`, `SYMERASEME_DATA_DIR`
+`ANTHROPIC_API_KEY` is required only for LLM calls using Anthropic.
+`SYMERASEME_DATA_DIR` is an optional data-directory override.
 ```
 
 ### Option 2: Auto-Detection
@@ -100,6 +101,9 @@ Cline reads `.clinerules/` automatically when opening the project.
 
 ## Environment Variables
 
+These overrides are optional. Configure credentials only for the selected LLM
+provider and features; other CLI commands do not require an Anthropic API key.
+
 ```bash
 export ANTHROPIC_API_KEY="sk-ant-..."
 export SYMERASEME_DATA_DIR="$HOME/.symeraseme"
@@ -113,8 +117,8 @@ For direct tool integration, configure an MCP server in `~/.cline/data/settings/
 {
   "mcpServers": {
     "symeraseme": {
-      "command": "uv",
-      "args": ["run", "symeraseme"],
+      "command": "symeraseme",
+      "args": ["mcp", "--stdio"],
       "env": {
         "ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY}",
         "SYMERASEME_DATA_DIR": "${HOME}/.symeraseme"

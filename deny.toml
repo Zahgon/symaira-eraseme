@@ -1,0 +1,46 @@
+[advisories]
+version = 2
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+skip = [
+    # CoreKit's reqwest/hyper stack and the existing CLI resolve these
+    # separately; keep the exception on the older pinned versions only.
+    { name = "base64", version = "=0.22.1" },
+    { name = "core-foundation", version = "=0.9.4" },
+    { name = "syn", version = "=2.0.119" },
+]
+skip-tree = [
+    # cap-std 4.0.3 deliberately supports several Windows API generations;
+    # isolate only its pinned platform graph while keeping the workspace-wide
+    # duplicate-version denial intact.
+    { name = "cap-std", version = "=4.0.3" },
+    { name = "cap-fs-ext", version = "=4.0.3" },
+    # ureq's maintained rustls stack uses ring's legacy getrandom edge;
+    # isolate only this pinned TLS subtree rather than allowing duplicates
+    # workspace-wide.
+    { name = "ring", version = "=0.17.14" },
+    # rand 0.9 (also used by the test-only proptest graph) follows the
+    # getrandom 0.3/r-efi 5 platform path while tempfile follows the newer
+    # getrandom 0.4/r-efi 6 path; keep the exception scoped to rand's subtree.
+    { name = "rand", version = "=0.9.5" },
+]
+
+[licenses]
+version = 2
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = ["https://github.com/danieljustus/symaira-corekit"]

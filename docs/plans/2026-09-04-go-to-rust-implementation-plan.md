@@ -7,7 +7,8 @@
 
 **Goal:** Replace the Go backend with an idiomatic Rust backend while preserving
 all CLI, MCP, data, security, SwiftUI and release contracts, with a tested Go
-fallback through the first stable Rust release.
+development oracle, backups and copied-store interoperability. The accepted
+2026-10-07 change removes the bundled Go fallback from new releases.
 
 **Architecture:** A three-crate internal Cargo workspace separates deterministic
 core behavior, external adapters/orchestration and the executable surface. Go
@@ -18,10 +19,31 @@ language-neutral black-box harness before integration.
 RustCrypto, Tokio/Axum/Reqwest-rustls, tracing, Nextest, llvm-cov, audit, deny,
 proptest/fuzzing; existing Go 1.26.6 and Swift 5.10/Xcode gates remain active.
 
-**Approval trigger:** Daniel's next reply `go` authorizes the full execution
+**Original approval trigger:** Daniel's reply `go` authorizes the full execution
 workflow below: branches/worktrees, local commits, pushes, PRs, CI repair and
 verified squash merges. It does not authorize contract changes, secret access,
 real-email sends, live broker submissions or destructive testing on real data.
+
+**2026-10-07 amendment:** `ok go` approves Rust-only distribution, obsolete
+Python inventory cleanup and independent review of the three function-local
+Windows FFI boundaries (#1171–#1173). Crate-wide unsafe denial, privacy/auth
+guards, real native tests, backup/data compatibility and seven-day stable
+observation remain mandatory. Existing `v0.13.0` assets are not overwritten.
+
+**2026-10-08 candidate evidence (#1171/#1173):** APP-001 passes on exact source
+`4e33d57475f286e2add83324b30c66dbad801111` in [native app run 37653688590](https://github.com/danieljustus/symaira-eraseme/actions/runs/37653688590):
+both Mac architectures executed 42 Swift tests with zero failures, including bundled
+and explicit Rust launch/auth/tools/shutdown. Merge
+`8d2db345a2e8cbaf13d2a2864eeeb38747fda37a` has the identical tree. The diagnostic app
+evidence is not a signed/notarized production artifact. For #1173, the independent
+review approved the three narrow boundaries at
+`d43cc9e15380a3416d58e033c55855b3ec2ce37c` ([review](https://github.com/danieljustus/symaira-eraseme/issues/1173#issuecomment-6038056502));
+the reviewed production FFI blobs are unchanged at the candidate. Native consent run
+[37653688502](https://github.com/danieljustus/symaira-eraseme/actions/runs/37653688502)
+passed on Windows amd64/arm64, and full native Rust run
+[37654259723](https://github.com/danieljustus/symaira-eraseme/actions/runs/37654259723)
+passed all six targets. These results authorize no broader unsafe use. CUT-004 stable
+publication/seven-day observation and CUT-005 separate Go-retirement approval remain open.
 
 **Machine-readable DAG:**
 `docs/plans/2026-09-04-go-to-rust-task-graph.json` owns task dependencies,
@@ -276,13 +298,13 @@ revision with no diff.
 - Modify: `.gitignore`
 
 **Steps:**
-- [ ] Pin Rust `1.98.0` with rustfmt and Clippy components.
-- [ ] Set workspace resolver, common package metadata, `rust-version = "1.98"`
+- [x] Pin Rust `1.98.0` with rustfmt and Clippy components.
+- [x] Set workspace resolver, common package metadata, `rust-version = "1.98"`
       and release profile explicitly.
-- [ ] Start every production crate with `#![deny(unsafe_code)]`.
-- [ ] Add only dependencies needed for the empty executable and tests.
-- [ ] Commit `Cargo.lock`.
-- [ ] Build a Rust executable named `symeraseme-rust` during shadowing; reserve
+- [x] Start every production crate with `#![deny(unsafe_code)]`.
+- [x] Add only dependencies needed for the empty executable and tests.
+- [x] Commit `Cargo.lock`.
+- [x] Build a Rust executable named `symeraseme-rust` during shadowing; reserve
       final output name `symeraseme` for cutover packaging.
 
 **Verification:** `cargo fmt --all --check`, `cargo check --workspace
@@ -297,15 +319,15 @@ revision with no diff.
 - Add to workspace: `rust-tests/parity`
 
 **Steps:**
-- [ ] Define data-driven cases containing argv, stdin bytes, env allowlist,
+- [x] Define data-driven cases containing argv, stdin bytes, env allowlist,
       cwd layout, timeout and expected comparison modes.
-- [ ] Launch Go and Rust in separate process groups with fresh HOME/XDG trees.
-- [ ] Capture raw status/signal/stdout/stderr before decoding.
-- [ ] Hash recursive filesystem manifests including type and mode.
-- [ ] Snapshot SQLite schema and ordered queries from copied databases.
-- [ ] Record mock HTTP exchanges and raw MCP frames.
-- [ ] Kill the process group on timeout.
-- [ ] Implement only narrow, reason-tagged normalizers.
+- [x] Launch Go and Rust in separate process groups with fresh HOME/XDG trees.
+- [x] Capture raw status/signal/stdout/stderr before decoding.
+- [x] Hash recursive filesystem manifests including type and mode.
+- [x] Snapshot SQLite schema and ordered queries from copied databases.
+- [x] Record mock HTTP exchanges and raw MCP frames.
+- [x] Kill the process group on timeout.
+- [x] Implement only narrow, reason-tagged normalizers.
 
 **Verification:** a deliberately different dummy Rust output fails with an
 actionable field-level diff; identical fixture programs pass.
@@ -316,12 +338,12 @@ actionable field-level diff; identical fixture programs pass.
 - Modify: `Makefile`
 
 **Steps:**
-- [ ] Preserve current `build`, `test`, `coverage`, `lint` semantics for Go
+- [x] Preserve current `build`, `test`, `coverage`, `lint` semantics for Go
       until cutover.
-- [ ] Add `build-go`, `go-gate`, `build-rust`, `rust-gate`, `parity`,
+- [x] Add `build-go`, `go-gate`, `build-rust`, `rust-gate`, `parity`,
       `app-test`, `release-dry-run`.
-- [ ] Keep output paths separate and prevent stale binary reuse.
-- [ ] Make `clean` remove generated Rust/Go test artifacts without touching
+- [x] Keep output paths separate and prevent stale binary reuse.
+- [x] Make `clean` remove generated Rust/Go test artifacts without touching
       committed fixtures.
 
 **Verification:** current Go commands still pass exactly; new Rust targets pass.
@@ -333,16 +355,16 @@ actionable field-level diff; identical fixture programs pass.
 - Modify: `.github/dependabot.yml`
 
 **Steps:**
-- [ ] Add Ubuntu PR gate: fmt, check, Clippy, Nextest, doctests and parity subset.
-- [ ] Enforce Rust line coverage at 80% overall and 90% for first-party crypto,
+- [x] Add Ubuntu PR gate: fmt, check, Clippy, Nextest, doctests and parity subset.
+- [x] Enforce Rust line coverage at 80% overall and 90% for first-party crypto,
       consent/auth and MCP protocol modules; report exact covered/total counts.
-- [ ] Add comprehensive main/schedule native matrix for macOS, Linux and
+- [x] Add comprehensive main/schedule native matrix for macOS, Linux and
       Windows.
-- [ ] Add `cargo audit`, `cargo deny check` and feature checks.
-- [ ] Cache Cargo safely using lockfile keys.
-- [ ] Keep Go CI required and unchanged.
-- [ ] Do not add path filters that make a required PR check disappear.
-- [ ] Read back the current ruleset contexts (`lint`, `test (3.12)`,
+- [x] Add `cargo audit`, `cargo deny check` and feature checks.
+- [x] Cache Cargo safely using lockfile keys.
+- [x] Keep Go CI required and unchanged.
+- [x] Do not add path filters that make a required PR check disappear.
+- [x] Read back the current ruleset contexts (`lint`, `test (3.12)`,
       `schema-validate`, `secrets-scan`). Add a stable Rust aggregate gate only
       after that check has run successfully on the default branch; never point
       protection at a check name that has not existed yet.
@@ -362,10 +384,10 @@ with repository rulesets; a PR runs both Go and Rust fast gates.
 - Test: `crates/symeraseme-cli/tests/version.rs`
 
 **Steps:**
-- [ ] Add failing tests for text, root `--version` and JSON schema v1.
-- [ ] Inject version through Cargo build environment without timestamps.
-- [ ] Match trailing newlines and key order exactly.
-- [ ] Pass `CLI-002..004` and the Swift `version --json` handshake expectation.
+- [x] Add failing tests for text, root `--version` and JSON schema v1.
+- [x] Inject version through Cargo build environment without timestamps.
+- [x] Match trailing newlines and key order exactly.
+- [x] Pass `CLI-002..004` and the Swift `version --json` handshake expectation.
 
 ### Task 2.2: Port time and confirmation pure functions
 
@@ -375,10 +397,10 @@ with repository rulesets; a PR runs both Go and Rust fast gates.
 - Test: matching module tests plus parity cases
 
 **Steps:**
-- [ ] Port all accepted timestamp layouts and UTC formatting.
-- [ ] Port link extraction/scoring and negative cases.
-- [ ] Add proptest coverage for timestamp round trips and hostile URLs.
-- [ ] Compare against Go fixtures, not rewritten expectations.
+- [x] Port all accepted timestamp layouts and UTC formatting.
+- [x] Port link extraction/scoring and negative cases.
+- [x] Add proptest coverage for timestamp round trips and hostile URLs.
+- [x] Compare against Go fixtures, not rewritten expectations.
 
 ### Task 2.3: Port configuration precedence
 
@@ -387,11 +409,11 @@ with repository rulesets; a PR runs both Go and Rust fast gates.
 - Test: `crates/symeraseme-core/tests/config_parity.rs`
 
 **Steps:**
-- [ ] Reproduce defaults/global/project/env order and exact paths.
-- [ ] Cover all supported `SYMERASEME_*` names and boolean parsing.
-- [ ] Test missing home, malformed TOML, unknown fields and relative paths.
-- [ ] Keep tests inside isolated HOME/CWD.
-- [ ] Pass `CFG-001..006` and `CLI-009`.
+- [x] Reproduce defaults/global/project/env order and exact paths.
+- [x] Cover all supported `SYMERASEME_*` names and boolean parsing.
+- [x] Test missing home, malformed TOML, unknown fields and relative paths.
+- [x] Keep tests inside isolated HOME/CWD.
+- [x] Pass `CFG-001..006` and `CLI-009`.
 
 ### Task 2.4: Scaffold the complete Clap command tree
 
@@ -402,12 +424,12 @@ with repository rulesets; a PR runs both Go and Rust fast gates.
 - Test: `crates/symeraseme-cli/tests/command_surface.rs`
 
 **Steps:**
-- [ ] Define every visible command, hidden alias, positional and flag/default.
-- [ ] Snapshot help and parser errors from the oracle corpus.
-- [ ] Route unported handlers to an internal test-only boundary; never ship a
+- [x] Define every visible command, hidden alias, positional and flag/default.
+- [x] Snapshot help and parser errors from the oracle corpus.
+- [x] Route unported handlers to an internal test-only boundary; never ship a
       fake success response.
-- [ ] Match Cobra output deliberately where Clap defaults differ.
-- [ ] Pass `CLI-001`, `CLI-005..008` parser/help portions.
+- [x] Match Cobra output deliberately where Clap defaults differ.
+- [x] Pass `CLI-001`, `CLI-005..008` parser/help portions.
 
 ---
 
@@ -420,11 +442,11 @@ with repository rulesets; a PR runs both Go and Rust fast gates.
 - Test: `crates/symeraseme-core/tests/registry_contract.rs`
 
 **Steps:**
-- [ ] Model every schema-v1 field with exact snake_case names/defaults.
-- [ ] Reject unknown keys at every closed object boundary.
-- [ ] Implement channel variant, enum, selector, URI/date and filename rules.
-- [ ] Run all four golden and negative fixtures.
-- [ ] Run the full real corpus; expected count is 1,277.
+- [x] Model every schema-v1 field with exact snake_case names/defaults.
+- [x] Reject unknown keys at every closed object boundary.
+- [x] Implement channel variant, enum, selector, URI/date and filename rules.
+- [x] Run all four golden and negative fixtures.
+- [x] Run the full real corpus; expected count is 1,277.
 
 ### Task 3.2: Port registry embedding, loading, filtering and sync
 
@@ -434,14 +456,15 @@ with repository rulesets; a PR runs both Go and Rust fast gates.
 - Test: loader/filter/sync parity tests
 
 **Steps:**
-- [ ] Embed committed registry data without runtime filesystem dependency.
-- [ ] Preserve underscore skipping, deterministic ordering and first/all-error
+- [x] Embed committed registry data without runtime filesystem dependency.
+- [x] Preserve underscore skipping, deterministic ordering and first/all-error
       behavior.
-- [ ] Preserve status/disabled filter semantics.
-- [ ] Mock HTTPS sync and verify safe validated replacement.
-- [ ] Measure lazy/eager loading; do not add a binary cache unless measured and
+- [x] Preserve status/disabled filter semantics.
+- [x] Mock HTTPS sync and verify safe validated replacement.
+- [x] Measure lazy/eager loading; do not add a binary cache unless measured and
       contract-neutral.
-- [ ] Pass `REG-001..008`.
+- [x] Pass `REG-001..008` locally; native Linux/Windows exact-head CI remains
+      required before merge.
 
 ### Task 3.3: Port legal and report templates
 
@@ -451,12 +474,13 @@ with repository rulesets; a PR runs both Go and Rust fast gates.
 - Test: `crates/symeraseme-core/tests/template_contract.rs`
 
 **Steps:**
-- [ ] First test MiniJinja against the existing canonical `.j2` sources.
-- [ ] Accept it only if all 11 outputs equal `golden-templates.json` byte for
+- [x] First test MiniJinja against the existing canonical `.j2` sources.
+- [x] Accept it only if all 11 outputs equal `golden-templates.json` byte for
       byte.
-- [ ] If not, port frozen templates into the Rust crate and document why.
-- [ ] Do not change legal wording, whitespace or escaping to suit the engine.
-- [ ] Pass `TMP-001..002`.
+- [x] Keep the canonical sources directly embedded; no frozen copies were needed.
+- [x] Do not change legal wording, whitespace or escaping to suit the engine.
+- [x] Pass `TMP-001..002` locally; native exact-head CI remains required before
+      merge.
 
 ### Task 3.4: Port redaction
 
@@ -465,11 +489,12 @@ with repository rulesets; a PR runs both Go and Rust fast gates.
 - Test: shared redaction corpus and property tests
 
 **Steps:**
-- [ ] Port every PII detector and profile-aware literal replacement.
-- [ ] Preserve replacement ordering, overlap and UTF-8 behavior.
-- [ ] Port safe path and consent-bound file review.
-- [ ] Fuzz text input; assert no panic and no matched sentinel leaks.
-- [ ] Pass `RED-001..002`.
+- [x] Port every PII detector and profile-aware literal replacement.
+- [x] Preserve replacement ordering, overlap and UTF-8 behavior.
+- [x] Port safe path and consent-bound file review.
+- [x] Fuzz text input; assert no panic and no matched sentinel leaks.
+- [x] Pass `RED-001..002` locally; native exact-head CI remains required before
+      merge.
 
 ---
 
@@ -566,7 +591,7 @@ with repository rulesets; a PR runs both Go and Rust fast gates.
       fallback and keyring fallback.
 - [ ] Use fake keyring/symvault adapters in normal tests.
 - [ ] Run native keyring integration tests separately without printing values.
-- [ ] Scan logs/errors for sentinel secrets.
+- [x] Scan logs/errors for sentinel secrets.
 - [ ] Pass `ID-001..003`.
 
 ### Task 4.7: Port consent tokens and destructive-operation gate
@@ -846,10 +871,12 @@ with repository rulesets; a PR runs both Go and Rust fast gates.
 
 **Steps:**
 - [ ] Place Rust `symeraseme` next to the Swift debug executable.
-- [ ] Test binary discovery, startup, token read, tools/list, representative
-      calls, error display and shutdown.
-- [ ] Do not change Swift protocol code to accommodate a Rust mismatch.
-- [ ] Pass `APP-001..004`.
+- [x] Test binary discovery, startup, token read, tools/list, representative
+      calls, error display and shutdown. Exact-source native run 37653688590
+      passed both bundled and explicit Rust backend integration cases on both Mac targets.
+- [x] Do not change Swift protocol code to accommodate a Rust mismatch; the
+      candidate diff changes `ServerManager.swift` and its integration test only.
+- [x] Pass `APP-001..004` on the candidate; see the source-bound evidence above.
 
 ### Task 9.2: Replace release build plumbing while preserving assets
 
@@ -881,7 +908,7 @@ with repository rulesets; a PR runs both Go and Rust fast gates.
 
 **Files:**
 - Separate repo after immutable prerelease assets exist:
-  `/Users/daniel/Dev/Symaira Dev/homebrew-tap/Formula/symeraseme.rb`
+  `/Volumes/1TB_NVMe_SN850X/Dev/Symaira_Dev/Repos/homebrew-tap/Formula/symeraseme.rb`
 
 **Steps:**
 - [ ] Update only from real published asset checksums.
@@ -893,28 +920,26 @@ with repository rulesets; a PR runs both Go and Rust fast gates.
 
 ---
 
-## Phase 10 — reversible cutover and retirement
+## Phase 10 — Rust-only cutover and oracle retirement
 
-### Task 10.1: Ship a dual-backend prerelease
+### Task 10.1: Ship a Rust-only prerelease
 
 **Files:**
-- Create: Rust fallback dispatch in CLI entrypoint
+- Remove: legacy runtime fallback dispatch in CLI entrypoint
 - Modify: `README.md`, `AGENTS.md`, `CONTRIBUTING.md`, `TROUBLESHOOTING.md`,
   release packaging and agent-skill wording that currently promises a Go
   backend
 
 **Steps:**
-- [ ] Package Rust as `symeraseme` and last-known-good Go as `symeraseme-go`.
-- [ ] Implement explicit `SYMERASEME_BACKEND=go`: Unix process replacement;
-      Windows spawn/wait with inherited stdio and exact exit propagation. Test
-      argument, env and cwd preservation plus platform-appropriate signals.
-- [ ] Test fallback absence and version mismatch loudly.
+- [ ] Package only Rust as `symeraseme`; no Go sibling in CLI archives or app.
+- [ ] Retire `SYMERASEME_BACKEND` dispatch and prove a legacy selector/sibling
+      cannot redirect the Rust runtime.
+- [ ] Test exact Rust-only archive/app contents and embedded dependency identity.
 - [ ] Publish a prerelease; never overwrite stable assets.
-- [ ] Document the dual-backend prerelease honestly: Rust is primary, Go is an
-      explicit rollback backend, and historical Go-port documents stay marked
-      as history rather than being silently rewritten.
-- [ ] Run clean-install, upgrade, encrypted/plain DB and rollback smoke tests on
-      macOS, Linux and Windows.
+- [ ] Document Rust-only distribution honestly; Go remains a development oracle,
+      while historical dual-backend releases keep their original records.
+- [ ] Run clean-install, upgrade, backups and encrypted/plain copied-store
+      compatibility tests on macOS, Linux and Windows with a separate oracle.
 - [ ] Pass `CUT-001..003`.
 
 ### Task 10.2: Canary and stable Rust release
@@ -929,9 +954,13 @@ with repository rulesets; a PR runs both Go and Rust fast gates.
 - [ ] Record final binary size/startup/RSS and honest regressions/gains.
 - [ ] Enforce the proposal's value gate: no unexplained >20% regression and a
       15% p95-startup or RSS gain, otherwise stop for an explicit exception.
-- [ ] Keep `symeraseme-go` and rollback docs through this stable release.
+- [ ] Verify no Go runtime is bundled; preserve backups and historical artifacts.
+- [x] Verify independent review and native Windows amd64/arm64 acceptance of
+      the three approved local FFI exceptions; no blanket unsafe allowance.
+      Review at `d43cc9e` is recorded in #1173; current-source runs 37653688502
+      (native Windows amd64/arm64) and 37654259723 (all six targets) pass.
 - [ ] Schedule a durable release+7-day follow-up that rechecks open defects,
-      release assets and rollback evidence before Task 10.4 starts.
+      release assets and recovery/compatibility evidence before Task 10.4 starts.
 - [ ] Pass `CUT-004`.
 
 ### Task 10.3: Final integration review
@@ -942,7 +971,8 @@ with repository rulesets; a PR runs both Go and Rust fast gates.
       dependency and platform risk.
 - [ ] Security reviewer: crypto, keyring, consent, auth, path handling,
       redaction and release provenance.
-- [ ] Release reviewer: archives, Homebrew, DMG, signing/notarization, rollback.
+- [ ] Release reviewer: Rust-only archives/app, Homebrew, DMG,
+      signing/notarization, backups and compatibility.
 
 **Coordinator verification:**
 
@@ -964,9 +994,13 @@ reading the PR and main branch back from GitHub.
 ### Task 10.4: Retire Go in a separate reviewed change
 
 **Prerequisite:** one stable Rust release has operated for at least seven days
-without unexplained parity defects. The initial `go` already authorizes this
-separate retirement PR once that gate is proven; no avoidable second approval
-pause is introduced.
+without unexplained parity defects.
+
+**Approval gate:** CUT-005 explicit approval for Go-source retirement remains
+OPEN. The prior `go` and `ok go` approvals cover the Rust-only candidate and
+its distribution, not deletion of Go source, modules or workflows. Do not begin
+retirement edits until the stable-release observation gate passes and separate
+explicit Go-retirement approval is recorded.
 
 **Files:**
 - Create: `docs/go-test-rust-port-classification.md`
@@ -977,12 +1011,14 @@ pause is introduced.
 - [ ] Classify every Go test file as ported, contract-replaced or intentionally
       retired, with exact Rust test/fixture evidence; no unclassified test may
       disappear.
-- [ ] Verify rollback from Rust-created plain and encrypted data once more.
+- [ ] Verify backup/recovery and retained-oracle compatibility from copied
+      Rust-created plain and encrypted data once more.
 - [ ] Remove Go source, `go.mod`, `go.sum`, Go CI and GoReleaser only in this PR.
 - [ ] Update branch protection in safe order: prove the Rust aggregate check,
       require it, remove Go-only required contexts, read protection back, and
       only then delete workflows that emitted the old contexts.
-- [ ] Remove fallback binary/env path and stale Go wording.
+- [ ] Verify the already retired fallback binary/env path stays absent; remove
+      remaining development-only Go references and stale wording.
 - [ ] Keep historical contract docs and migration records.
 - [ ] Re-run every Rust/app/release gate.
 - [ ] Update `AGENTS.md`, README, CONTRIBUTING, TROUBLESHOOTING and ecosystem
@@ -995,8 +1031,8 @@ pause is introduced.
 
 - [ ] Every required row in `docs/rust-port-contract-matrix.md` is PASS.
 - [ ] Go and Rust match on deterministic success, error and side-effect cases.
-- [ ] Existing plain/encrypted databases and identity profiles work both ways
-      through the rollback window.
+- [ ] Existing plain/encrypted databases and identity profiles remain compatible;
+      backups and retained-oracle comparisons are verified before retirement.
 - [ ] `cargo fmt`, check, Clippy `-D warnings`, Nextest, doctests, feature checks,
       llvm-cov, audit and deny pass.
 - [ ] Rust coverage is at least 80% overall and 90% in the critical
@@ -1008,6 +1044,7 @@ pause is introduced.
       SBOMs and Homebrew behavior are verified from real artifacts.
 - [ ] Final performance measurements are published against the Go baseline;
       regressions are explicit, not massaged away.
-- [ ] Rollback is documented and exercised before Go retirement.
+- [ ] Backup/recovery and historical artifact availability are documented and
+      exercised before Go retirement; no Go runtime is bundled.
 - [ ] Repository is clean, `main` is synchronized, worktrees are removed and
       the final merged/released state is read back and verified.

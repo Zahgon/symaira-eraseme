@@ -1,0 +1,176 @@
+use serde_json::Value;
+use std::process::Command;
+use symeraseme_core::confirmation::extract_confirmation_links;
+use symeraseme_core::timeutil::{TimestampError, format_iso, format_sql, format_sql_bytes, parse};
+
+fn frozen_go_oracle() -> Value {
+    use sha2::{Digest, Sha256};
+    let raw = include_bytes!("../fixtures/frozen/go1.26.6/time-confirmation/observations.json");
+    let provenance: Value = serde_json::from_slice(include_bytes!(
+        "../fixtures/frozen/go1.26.6/time-confirmation/provenance.json"
+    ))
+    .unwrap();
+    assert_eq!(provenance["exit_status"], 0);
+    assert_eq!(provenance["go_version"], "go version go1.26.6 linux/amd64");
+    assert_eq!(provenance["counts"]["timestamps"], 32);
+    assert_eq!(provenance["counts"]["urls"], 8);
+    assert_eq!(provenance["stdout"]["bytes"], raw.len());
+    assert_eq!(provenance["stdout"]["sha256"], hex(&Sha256::digest(raw)));
+    let input = include_bytes!("../oracle/cases.json");
+    assert_eq!(
+        provenance["sources"]["rust-tests/parity/oracle/cases.json"]["sha256"],
+        hex(&Sha256::digest(input))
+    );
+    serde_json::from_slice(raw).unwrap()
+}
+
+fn string_field<'a>(row: &'a Value, name: &str) -> &'a str {
+    row.get(name).and_then(Value::as_str).unwrap_or("")
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(DIGITS[(byte >> 4) as usize] as char);
+        output.push(DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+#[test]
+fn go_oracle_matches_rust_time_and_confirmation_contract() {
+    let fixture: Value = serde_json::from_slice(include_bytes!("../oracle/cases.json"))
+        .expect("committed parity fixture must be valid JSON");
+    let oracle = match std::env::var("SYMERASEME_PARITY_LIVE_GO").as_deref() {
+        Ok("0") | Err(std::env::VarError::NotPresent) => frozen_go_oracle(),
+        _ => panic!("live Go execution is retired; SYMERASEME_PARITY_LIVE_GO must be 0 or unset"),
+    };
+    assert_observations_match(&fixture, &oracle);
+}
+
+#[test]
+fn retired_live_go_opt_in_fails_before_oracle_execution() {
+    let empty = tempfile::tempdir().unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "go_oracle_matches_rust_time_and_confirmation_contract",
+            "--nocapture",
+        ])
+        .current_dir(empty.path())
+        .env("PATH", empty.path())
+        .env("SYMERASEME_PARITY_LIVE_GO", "1")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("live Go execution is retired"));
+}
+
+fn assert_observations_match(fixture: &Value, oracle: &Value) {
+    let fixture_timestamps = fixture["timestamps"]
+        .as_array()
+        .expect("timestamp fixture rows");
+    let oracle_timestamps = oracle["timestamps"]
+        .as_array()
+        .expect("timestamp oracle rows");
+    assert!(
+        fixture_timestamps.len() == oracle_timestamps.len(),
+        "timestamp fixture and oracle row counts differ"
+    );
+
+    for (index, (fixture_row, oracle_row)) in
+        fixture_timestamps.iter().zip(oracle_timestamps).enumerate()
+    {
+        let input = fixture_row["input"]
+            .as_str()
+            .expect("timestamp fixture input");
+        assert!(
+            string_field(oracle_row, "input") == input,
+            "timestamp oracle input changed at row {index}"
+        );
+        let accepted = oracle_row["accepted"]
+            .as_bool()
+            .expect("timestamp oracle acceptance");
+        match parse(input) {
+            Ok(value) => {
+                assert!(
+                    accepted,
+                    "Rust accepted timestamp rejected by Go at row {index}"
+                );
+                assert!(
+                    string_field(oracle_row, "iso") == format_iso(value),
+                    "canonical ISO differs at timestamp row {index}"
+                );
+                assert!(
+                    string_field(oracle_row, "sql") == format_sql(value),
+                    "canonical SQL differs at timestamp row {index}"
+                );
+                assert!(
+                    string_field(oracle_row, "sql_bytes_hex") == hex(&format_sql_bytes(value)),
+                    "canonical SQL bytes differ at timestamp row {index}"
+                );
+            }
+            Err(error) => {
+                assert!(
+                    !accepted,
+                    "Rust rejected timestamp accepted by Go at row {index}"
+                );
+                let class = match error {
+                    TimestampError::Empty => "empty",
+                    TimestampError::Malformed => "malformed",
+                };
+                assert!(
+                    string_field(oracle_row, "error_class") == class,
+                    "timestamp error class differs at row {index}"
+                );
+            }
+        }
+    }
+
+    let fixture_urls = fixture["urls"].as_array().expect("URL fixture rows");
+    let oracle_urls = oracle["urls"].as_array().expect("URL oracle rows");
+    assert!(
+        fixture_urls.len() == oracle_urls.len(),
+        "URL fixture and oracle row counts differ"
+    );
+    for (index, (fixture_row, oracle_row)) in fixture_urls.iter().zip(oracle_urls).enumerate() {
+        let input = fixture_row["input"].as_str().expect("URL fixture input");
+        assert!(
+            string_field(oracle_row, "input") == input,
+            "URL oracle input changed at row {index}"
+        );
+        let expected = oracle_row["links"].as_array().expect("URL oracle links");
+        let actual = extract_confirmation_links(input);
+        assert!(
+            expected.len() == actual.len(),
+            "URL result count differs at row {index}"
+        );
+        for (link_index, (expected_link, actual_link)) in expected.iter().zip(actual).enumerate() {
+            assert!(
+                expected_link.as_str() == Some(actual_link.as_str()),
+                "URL result differs at row {index}, link {link_index}"
+            );
+        }
+    }
+}
+
+#[test]
+fn frozen_oracle_mutations_are_rejected_without_reducing_case_counts() {
+    let fixture: Value = serde_json::from_slice(include_bytes!("../oracle/cases.json")).unwrap();
+    let oracle = frozen_go_oracle();
+    let mut changed = oracle.clone();
+    changed["timestamps"][0]["iso"] = Value::String("corrupted-observation".into());
+    assert!(std::panic::catch_unwind(|| assert_observations_match(&fixture, &changed)).is_err());
+    let mut changed = oracle.clone();
+    changed["timestamps"].as_array_mut().unwrap().pop();
+    assert!(std::panic::catch_unwind(|| assert_observations_match(&fixture, &changed)).is_err());
+    let mut changed = oracle;
+    changed["urls"][0]["links"]
+        .as_array_mut()
+        .unwrap()
+        .push(Value::String(
+            "https://mutation.example.invalid/confirm".into(),
+        ));
+    assert!(std::panic::catch_unwind(|| assert_observations_match(&fixture, &changed)).is_err());
+}

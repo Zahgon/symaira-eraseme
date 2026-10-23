@@ -1,5 +1,115 @@
 # Go → Rust executable contract matrix
 
+## Current retirement candidate readback (2026-10-13)
+
+[Candidate acceptance](rust-port/handoffs/2026-10-13-go-retirement-native-acceptance.md)
+binds PR #1232 head `3b8916b827768ab3500c0804d1cbf749cc22ad23` to fresh
+six-target native Rust tests, 48 backup/restore cases, 72 copied-store cases,
+six actual Rust-only archives with twelve SBOM sidecars, and 42 Swift tests
+on each Mac architecture. All 20 candidate workflows pass.
+
+CUT-005 source/module/toolchain removal is implemented on that candidate;
+overall CUT-005 remains OPEN for the documented review, metadata, merge and
+release requirements. No release row is promoted from CI archives or mock
+packaging tests. The historical checkpoints below retain their original scope.
+
+## Historical authorization and readback (2026-10-12)
+
+The [maintainer's dated amendment](rust-port/handoffs/2026-10-12-observation-waiver.md)
+waives the seven-day observation period and explicitly authorizes Go retirement.
+CUT-004 retained technical readback passes within the documented evidence scope;
+independent review and merge remain required. Observation is WAIVED, not observed.
+CUT-005 remains OPEN until implementation and all technical gates pass. Frozen
+captures, original failures and historical release assets remain unchanged.
+
+## Published Rust-only acceptance (2026-10-11, historical checkpoint)
+
+The [current release-bound reconciliation](rust-port/handoffs/2026-10-11-published-rust-only-reconciliation.md)
+supersedes the historical statuses below for #1131, REL-001..010 and CUT-001..005.
+It binds stable immutable `v0.14.1` to
+`587e9e0e3aaa4d4bbacdd28a7087d17ac2748548` and current native reader acceptance to
+main `89a0fbcdef745714950ca1994ceb11c0e8b832ab`. Original captures and historical
+`v0.13.0` evidence remain unchanged.
+
+| Rows | Current verdict | Evidence boundary |
+| --- | --- | --- |
+| #1131 | PASS within its frozen-parity scope | Current six-target native readers and scoped Go-absent cases; retained dedicated Linux Go-absent run: 430 passed, two helper entries ignored. Reuse is supported by the tracked-source/configuration comparison, not complete compiler/environment closure, a new native run or blanket six-target SDK-absent workspace proof. |
+| REL-001..005 | PASS for published v0.14.1 | All six Rust-only archive roots, 21 public asset digests, original native smoke/linkage, four native Homebrew installations and exact current tap Formula readback. |
+| REL-006 | PASS for the existing public v0.14.1 DMG | Literal read-only `hdiutil` mount on Mac Mini/macOS 15.8.1/x86_64: ten checks, 25 unique manifest entries, successful detach and independent parent cleanup readback. The linked reconciliation binds release `409043734`, asset `628363023` and its exact SHA-256. Earlier local failures remain historical; no HFS-alternative waiver. |
+| REL-007..010 | PASS for published v0.14.1 | Actual app/helper/DMG signatures, stapling/Gatekeeper, same-run packed SBOM verification, eight fresh exact-source/tag/workflow attestations and source-equivalent audit/deny evidence. |
+| CUT-001..003 | PASS within current contracts | Six-native retired-selector tests; original same-run public Rust binaries and separate Go development oracle: 72 copied-store/switchback cases, 144 raw streams. Not older published Go schema-v2 compatibility. |
+| CUT-004 | OPEN | Stable observation starts at `2026-10-10T17:38:53.187732+00:00`; earliest seven-day review `2026-10-17T17:38:53.187732+00:00`, with genuine observation evidence required. |
+| CUT-005 | OPEN | Observation and separate explicit Go-source/toolchain retirement approval remain required. |
+
+The detailed receipt preserves successful jobs separately from the original
+release workflow's failed final publication step. No release/CI rerun, production
+data operation, Go deletion or historical-evidence rewrite occurred. Prior R1/R2
+corrections passed independent delta review. This publication-safe documentation
+candidate and its full intended push history await fresh independent
+SPEC/evidence and QUALITY/security review.
+
+## Historical Rust-only candidate scope (2026-10-08, #1171–#1173)
+
+The maintainer approved `ok go`: new CLI archives/app contain no Go sibling,
+and the legacy backend selector is retired. CUT-001 now proves that a legacy
+selector or sibling cannot redirect Rust; CUT-002/CUT-003 retain copied-store
+compatibility using a separately built development oracle, not a bundled
+rollback. Go source retirement stays separate under CUT-005 after observation.
+
+The candidate root/app README, AGENTS, migration proposal and migration-status docs were
+byte-identical to reviewed documentation source
+`da43ec384f626be2937870735dd69b8ec078d467` before this reconciliation. The current
+instructions distinguish Rust-only distribution, the temporary Go development oracle,
+immutable `v0.13.0` rollback assets and the historical Python recovery tag.
+
+APP-001 now passes candidate-bound native app acceptance on exact source
+`4e33d57475f286e2add83324b30c66dbad801111` in [run 37653688590](https://github.com/danieljustus/symaira-eraseme/actions/runs/37653688590):
+both native Mac jobs executed all 42 Swift tests with zero failures. The merged commit
+`8d2db345a2e8cbaf13d2a2864eeeb38747fda37a` has the same Git tree
+(`056f5c4837ff4a0b04ad113d0cd4cbf2d1908311`). This diagnostic app run is not
+signing/notarization, production DMG or full release evidence; CUT-001 remains
+non-PASS pending its separate candidate acceptance.
+
+The scoped #1173 Windows boundary acceptance also passes for this candidate. The three
+narrowly approved FFI boundaries were independently reviewed at
+`d43cc9e15380a3416d58e033c55855b3ec2ce37c` ([review record](https://github.com/danieljustus/symaira-eraseme/issues/1173#issuecomment-6038056502));
+all three production FFI source blobs are unchanged at
+`4e33d57475f286e2add83324b30c66dbad801111`. [Native consent run 37653688502](https://github.com/danieljustus/symaira-eraseme/actions/runs/37653688502)
+passed on Windows amd64 and arm64 (22 passed, zero failed, one helper entry ignored
+per architecture); logs confirm real Go consent/DACL comparisons, `CloseHandle` error 6
+propagation, one owner close, preserved old token/unrelated sentinel and temporary
+cleanup. [Full Rust native run 37654259723](https://github.com/danieljustus/symaira-eraseme/actions/runs/37654259723)
+passed all six targets, including the named NUL-path and retired-selector regressions.
+No broader unsafe exception is approved; crate-wide unsafe denial remains intact.
+
+Existing REL-001..010 PASS entries certify only the immutable historical `v0.13.0` assets. They do not approve changed archive, SBOM, app, formula or signing contents: every release row requires fresh candidate-bound execution/readback before stable publication. CUT-004 stable publication/seven-day observation and CUT-005 separate Go-retirement approval remain open. Historical preparation/capture notes below keep their original source scope.
+
+The subsequent HTTP EINTR repair preserves the original read timeout and
+all twelve original parents, with three additional bounded-error controls.
+Its changed wire generator requires four real native Unix recaptures;
+`frozen-http-wire-capture.yml` records the original ten Go/Rust comparisons
+on Linux amd64/arm64 and macOS amd64/arm64. The earlier 380-test no-Go result
+is historical at `81bb019`; current frozen acceptance must fail until all
+four original wire references are genuinely refreshed. Other native families
+retain their actual `e8bb6643` records. #1131 and cutover rows remain open.
+
+
+Current-source frozen preparation (2026-10-04, #1131) now retains and
+independently verifies all forty actual artifacts from six-native capture
+`37188052753` at `e8bb6643`: 1,481 source pins per service manifest and
+fifty-two whole process records. The source-bound MCP/grant/schedule readers
+now cover both Mac architectures in addition to Linux/Windows; native
+streams, original finite cases, input generators and budgets remain intact.
+The receipt under `go-frozen/native-0d/e8` records genuine artifact digests
+and the producer run's later stale-reader failures. Strict workspace Clippy
+and compile-only verification pass. The exact default Go-absent suite passes
+380 tests with zero failures; the delegated consent parent executes all sixteen
+private cases. Current-head six-native reader acceptance
+and six auxiliary HTTP parents without Go remain required. #1131, release
+and cutover rows stay open. The app PR's Go test change additionally requires
+real post-integration service recapture; old hashes must not be relabelled.
+
+
 > Performance/release baseline: commit
 > `240bf67cefa05e643e32611a02e6e7ed87a033ea` (`v0.12.1`). The corrected Go
 > executable contract oracle is pinned to
@@ -11,6 +121,745 @@
 > required row is `PASS`. `TODO` means the contract is known but its
 > differential case has not yet been implemented.
 
+The MCP ping preparation also moves the four existing equivalent-mutant
+anchors to their exact new positions, after verifying unchanged source
+contexts. No exclusion scope or budget changes. Actual mutation CI remains
+pending, and task 8.5 remains gated by 8.4 under #813.
+
+## Granular issue ownership (2026-10-02)
+
+The native triage fixture preparation also passes both original Linux amd64
+parents at clean `9a7d6b526d16d51735e6dc18935e0b2c1fab786d`: all sixteen CLI cases,
+all eight MCP raw-frame/saved-effect cases and ten positive CLI invocation
+controls. Go uses its original real CLI and Go native child; Rust uses its
+real CLI and a separately compiled native Rust synthetic child. Complete
+status/stdout/stderr, the existing provider-list-only ordering fold, saved
+reply/ordered events and invocation counts remain checked. Strict CLI
+all-target Clippy passes. The Rust fixture implements no Go CLI or MCP oracle.
+Both parents still require actual Go: measured default references and current
+acceptance on five other hosts remain pending.
+
+The native malformed-agent comparator additionally consumes an actual complete
+Linux amd64 Go helper record from clean producer
+`020bd691459c1107cef5e7ac639eaba58fdf98fb`. The 32024-byte record has SHA-256
+`f84c10a3d412b9257a709cba52370af5042116075508247e3283f26a7932214c`;
+172 Go inputs and five immutable/current input generators independently verify,
+including the measured Git newline policy. Complete Go oracle and helper
+stdout/stderr/status remain unchanged. Both measured Go output-limit rejections
+are retained. A real native Rust child fixture, compiled with Rust 1.98.0,
+produces the same bad UTF-8 bytes and exit 23 and executes both live output-limit
+controls. It implements no MCP or Go oracle. The original MCP JSON/frame and
+byte-mutation assertions remain; native Windows additionally runs the real Rust
+MCP process with that native Rust fixture. Unrecorded hosts and explicit
+live/capture modes still execute actual Go.
+
+At clean `5fbb447bd36e31615f0b1520e33e5033ca27fb8c`, the exact dedicated
+SDK-free workflow passes **377 tests, zero failures**. The original native-agent
+parent now executes with Go absent on Linux amd64; all twenty-one frozen native
+records plus the published-release manifest match immutable Git blobs and an
+actual autocrlf checkout. The delegated consent parent still executes all
+sixteen private cases. Actual captures/current acceptance on the five other
+hosts, native triage and six HTTP auxiliary families remain required. This is
+scoped preparation; issue #1131 and complete-workspace independence stay open.
+The same original native-helper parent passes with private actual current Go;
+strict CLI all-target Clippy passes. Only the bounded measured synthetic
+observation JSON is uploaded, with no profile, database or cache contents.
+
+The rollback preparation at clean
+`486165456bf328a45f09a6529e507953f92f7bfd` passes the exact dedicated
+SDK-free workflow: **376 tests, zero failures**, including the original explicit
+fallback test with the actual published `v0.12.1` sibling. The SDK stays absent;
+this published runtime is retained only for the explicit rollback test until
+removal, outside PATH. All original CLI streams/statuses, native/fallback MCP
+initialize bytes and missing/invalid-backend controls execute. Three actual
+compiled negative runs reject a same-size changed binary, symlink and foreign
+native target. All twenty frozen native files plus the actual release manifest
+match immutable Git blobs and a real autocrlf checkout. The delegated consent
+parent executes all sixteen private cases. The six-native verification script
+now also requires this original fallback test with zero skips; five other native
+hosts remain pending for this new mode.
+
+All six actual published archive consumers and 24 corruption/target/symlink
+controls also pass without a Go SDK at clean `d0443ebb80acf0bbcfaf0fd5e9b307218c532f3f`.
+Their bounded metadata independently matches actual SDK output. Optional
+SDK-free switchback/backup modes preserve all six/eight original real cases;
+new native execution remains pending. A private real Linux amd64 probe confirms
+published Go reads owned schema v1 but refuses schema v2. The candidate-built
+switchback lane remains intact and cannot prove compatibility of this older
+published binary; backup restore loses post-backup Rust writes. Published
+preservation/cutover acceptance and issue #1131 stay open. Current source
+`6ca3072` capture run `37176774792` passes complete Rust on both Linux, both
+Windows and macOS arm64. All five current service archives and ten complete
+plan records are independently verified; macOS amd64 remains queued. That
+manual capture is preserved before another dispatch.
+
+The #1131 rollback preparation additionally retains the actual six published
+`v0.12.1` archive identities and reads bounded native Go build metadata without
+a Go SDK. All six actual archive consumers and 24 corruption/symlink/foreign
+target controls pass with Go absent; metadata independently matches the actual
+SDK output. Optional published-release modes preserve the complete original
+switchback and backup/restore assertions, with native execution still pending.
+The actual Linux amd64 archive reads owned schema v1 but refuses schema v2.
+The candidate-built switchback workflow stays intact: it cannot establish
+compatibility of this older published binary. See
+[`plain-store-switchback.md`](rust-port/plain-store-switchback.md) and
+[`backup-restore-rehearsal.md`](rust-port/backup-restore-rehearsal.md).
+Issue #1131 and published fallback acceptance remain open.
+
+The original real-network SMTP comparators now also replay measured native
+Linux amd64 Go processes from clean producer
+`0b57be7f59923fd69eca54b7807743ffbaf6de2d`. The complete campaign record
+preserves stdout, stderr, exit status, the original SMTP transaction with its
+existing Date-only fold, and complete result/events/projected-plan output.
+The transport record preserves all nine original inputs, raw process streams
+and complete original client transactions: plain, OAuth2, rejected/challenged
+auth, credential echo, missing STARTTLS, rejected DATA/greeting and HELO
+fallback. The empty rejected-greeting transaction is the measured result.
+Every Rust socket, synthetic TLS-chain control, credential-redaction check,
+exact wire comparison and saved-effect assertion still executes. Recorded
+Go input ports remain unchanged; Rust connects to its own original native
+listener. Neither a Go child nor a Go server is simulated.
+
+Both records independently verify 172 immutable/current Go inputs and four
+immutable/current Rust input generators, native unmodified Go 1.26.6 VCS and
+all ten successful Go process statuses/streams. Whole-record SHA-256 pins are
+`ab0a2a2a89e06287237238452aafc2d82af3f83885d5a1d8c7a584150a6c1d3e`
+(campaign, 35149 bytes) and
+`99b28b29c764ed8d38cad725fb146eb2cbf5a47797c9cb1fed6b9ba909cd0a12`
+(transport, 42549 bytes). Explicit live/capture modes and unrecorded hosts
+continue to run actual Go. Current native capture uploads only these two
+bounded synthetic observation records, not profiles or databases.
+
+At clean `4f6ee8b0e48abb9a58fd8af34bf5516cee20c9bb`, the exact default
+Go-absent workflow passes **375 tests, zero failures**. All three original
+SMTP integration tests execute, including all nine transport cases and the
+three private TLS-chain controls. The delegated consent child still runs
+all sixteen original cases. All twenty retained native files match immutable
+Git blobs and a real autocrlf checkout. The same SMTP comparators pass with
+private actual Go; strict core/CLI all-target Clippy passes.
+
+A broader full-workspace Go-absent diagnostic at `114fd2a` is retained as a
+failure: twelve actual tests across six targets required Go, including these
+two now-prepared SMTP families. The remaining fallback, native helper/triage
+and six HTTP auxiliary cases need their own measured evidence. The new SMTP
+readers require actual capture and current Rust acceptance on all six native
+hosts. Issue #1131 remains open; run `37176774792` at `6ca3072` is preserved
+until both queued macOS captures complete before another manual dispatch.
+
+The stricter complete-header HTTP comparator now also replays a measured
+Linux amd64 record from clean producer
+`17cfa0931b853345bd0b14afda3f77f25d66c656`. Its ten original cases retain the
+entire raw response: status line, every header including the original Date,
+and complete body bytes. The unchanged parser validates exactly one
+canonical Date before applying the original `<DATE>` comparison. All other
+header values, duplicate-header controls, status assertions and exact body
+comparisons remain intact. The actual 39156-byte record has SHA-256
+`09a5a5329c9d37839e22b7a6b0c793b5e5cd566dd292a6ac4027c681993b3bdf`;
+171 Go sources and three immutable/current generator pins verify. Original
+cleanup kills the servers; exit/stdout/stderr are outside this comparator.
+Unrecorded targets and explicit live/capture modes still execute actual Go.
+
+At clean `114fd2a5bf1455f874c17a91fe42010954b725de`, the exact default
+Go-absent workflow passes **372 tests, zero failures**, including all five
+complete-header tests and both ten-case HTTP process comparators. The sole
+consent child runs all sixteen isolated cases under its passing parent.
+All eighteen retained native files match immutable Git blobs and an actual
+autocrlf checkout. The same ten complete-header cases pass with private
+actual Go; strict CLI all-target Clippy passes. Current native HTTP reader
+acceptance remains pending, with raw complete-header captures required on
+all six hosts and the older wire captures on all four Unix hosts.
+
+The Linux amd64 original HTTP wire comparator now consumes a measured actual
+Go record from clean producer `b518d619f297754970ac7b44f86497aafd1072ad`.
+All ten unchanged request cases still compare real Rust HTTP status,
+Content-Type and complete body bytes. Ephemeral native bearer tokens retain
+only the original request-token substitution; other response headers and
+process stdout/stderr are outside this original comparator. The retained
+38331-byte record SHA-256 is
+`afc81fa177dc03ee70c6f26ed74334304671d2ea20e6106f9a629876c16e7d32`.
+Its 171 actual Go input pins and three immutable/current Rust input generator
+pins were independently read back; native Go 1.26.6 VCS is unmodified and
+server exit status is zero. Whole-record corruption, truncation and source
+changes are rejected before replay. Explicit live/capture modes and the
+three unrecorded Unix hosts continue to execute actual Go.
+
+At clean `a2a7219d16179878b5d4094c0565daf212a03822`, the exact default
+Go-absent workflow passes **367 tests, zero failures**; the sole delegated
+consent child is actually run in all sixteen isolated cases by its parent.
+The same original HTTP comparison passes with private actual Go, and strict
+CLI all-target Clippy passes. All seventeen retained native files match
+immutable Git blobs and an actual autocrlf checkout. The other HTTP cases,
+native Windows helpers and fallback transports still require Go.
+
+Current native reader run `37176774792` at `6ca3072` passes complete Rust on
+both Linux and both Windows hosts. All four service archives and eight
+whole-plan records have been independently read back. Both macOS jobs and
+their current archives remain queued; this run is retained before another
+manual capture is dispatched. The new HTTP reader awaits its own current
+native acceptance, including actual capture on all four Unix hosts. Issue
+#1131 remains open.
+
+Actual native run `37172389657` at clean `0972f73` now passes all six
+complete Rust suites. Every downloaded Linux/Windows/macOS service archive
+has been independently read back: all 1481 immutable source/input pins,
+native unmodified Go 1.26.6 VCS, full streams/status and 132 Unix or 111
+Windows observations. All twelve separate complete plan-process records
+also verify the original stdout/stderr/status and full state/events/manual-
+task tuple, 171 Go inputs and three archived input generators. Both Mac
+recordings preserve the actual producer bytes; no host result is inferred.
+
+The readers now select measured native records for both complete plan tests
+on all six hosts, and the three original Unix process comparisons on all
+four Unix hosts. Each Unix manifest is sealed by its measured whole SHA-256;
+all six raw streams independently match the original retained fixture bytes.
+Changed generators or dependency locks require real recapture. Explicit
+live and plan-capture modes still execute actual Go. Current native CI
+additionally removes Go from its subprocess PATH and requires both original
+plan cases on every host and all three original process cases on Unix.
+At clean `c0f598586d5f76529229a6ba9b7c971f29bf7a76`, the exact default
+Go-absent workflow passes 366 tests with zero failures. Its sole top-level
+consent child is executed in all sixteen private cases by its passing parent.
+The same three Unix comparators also pass with private actual Go; strict
+CLI all-target Clippy passes. All sixteen newly retained plan records/native
+manifests match Git blobs and an actual autocrlf checkout. Current native
+reader acceptance and complete-workspace Go independence remain pending;
+remaining HTTP, native helper and fallback transports still execute Go.
+Issue #1131 remains open. Main `ed6a74f` is integrated; future Go-source
+changes from pending MCP integration require actual recapture.
+
+Linux amd64 now prepares frozen references for both complete consented plan
+process tests using the actual unmodified records from `fae7b5d`. Whole-record
+SHA-256 pins seal stdout/stderr/status, all 171 Go sources and the original
+state/events/manual-task tuple. The archived Rust input generators are
+verified against their immutable Git blobs. Real Rust processes, exact byte
+comparisons and every existing persisted-effect assertion remain intact;
+changed/truncated records and fabricated state are rejected. Explicit capture
+always executes actual Go, as do explicit live mode and unrecorded targets.
+At clean `d401fc085d7203d305883e84806acfe9e6f4c9a7`, the exact Go-absent
+workflow passes 366 tests with zero failures. The sole top-level ignored
+consent child is actually executed in all sixteen isolated cases by its
+passing parent. Both new whole-process tests pass without Go and with private
+actual Go; strict CLI Clippy passes. Both raw process records survive Git
+and autocrlf byte-exactly. An initial local run retained a stale encryption
+test binary from the other checkout in the shared Cargo target; its embedded
+build path identifies that source. Sequential recompilation of the current
+checkout resolves the cache issue with no source-byte or acceptance change.
+The old failed log and binary identity are retained. Current six-target
+acceptance and complete-workspace Go independence remain pending.
+
+Actual run `37170268056` at clean `9e1a0bb` passes four complete native Rust
+suites (Linux and Windows on amd64 and arm64). All four downloaded artifacts
+independently verify all 1481 immutable source/input pins, native unmodified
+Go VCS and complete observations: 132 cases/115 exact members on Unix and
+111 cases/103 exact members on Windows. Provider cancellation and the Unix
+process fixtures match their original byte-exact corpora. Both Mac jobs
+remain queued; their acceptance and the new plan recordings are pending.
+
+
+The existing two complete consented plan-execution process comparators now
+prepare an opt-in actual Go recorder. When explicitly selected, it retains
+whole stdout/stderr/status and the original persisted state/events/manual-task
+tuple for both private synthetic web-form and senderless-email cases. All
+171 Go input/source pins, archived Rust input-generator identity and native
+Go 1.26.6/unmodified VCS are included; cross-compilation, dirty sources and
+existing output files are rejected. The narrow upload contains exactly two
+JSON records, excluding databases, consent tokens, profiles and build caches.
+Both original complete Go/Rust process comparisons pass in disposable roots
+at clean `fae7b5da416db5e491ed3b4d1944069d3f80d291`. Independent readback
+validates both whole output/effect records, all 171 immutable Go inputs, all
+three archived input-generator identities and actual native Go VCS. Current
+native recordings and frozen-reader acceptance remain required.
+
+
+The subsequent actual 110-observation run `37168958036` at clean
+`212c2821eb154544c5948a72f2f24a0a98bcfc12` passes four complete native Rust
+suites (both Linux and both Windows). All four downloaded 98-member archives
+independently verify every 1476 immutable input/source pins, native Go
+1.26.6/unmodified VCS, complete streams and original acceptance controls.
+Both macOS jobs remain queued; this evidence does not establish their result.
+
+
+Actual clean Linux-amd64 capture `8febd4dfa3498065b464ccde79aaaceafaba44c6`
+passes 132 observations. Independent readback validates all 1481 immutable
+input/source pins, 115 narrowly selected upload members, native unmodified
+Go VCS and all 22 added complete observations. CLI triage, malformed-stderr
+and provider-cancellation bytes match their original committed fixtures.
+Linux amd64 defaults now replay the retained whole CLI triage/MCP triage/
+malformed-stderr outputs with status/streams/provenance checks. Complete
+live Rust processes, all sixteen CLI cases, all four MCP cases, state effects
+and malformed UTF-8 comparison remain unchanged; explicit live mode and all
+other native hosts run the real producer. Corruption controls reject changed/
+truncated frames and fabricated source identity before replay. The Go-free
+workflow adds the three original complete process tests. At clean
+`d8dba96a70439d83b4d2dab9d128ff2148d973aa`, its exact Go-absent execution
+passes 364 tests with zero failures. The sole top-level ignored consent
+harness child is actually executed in all sixteen isolated cases by its
+passing parent. The same three complete process comparisons pass with private
+actual Go; strict CLI Clippy passes. All seven retained raw files match Git
+blobs and a real autocrlf checkout. Native acceptance of these additions and
+complete-workspace Go independence remain pending.
+
+
+The opt-in #1131 producer additionally prepares actual provider cancellation
+(one loopback client/provider observation on every target) and the existing
+Unix shell-agent corpora: one complete malformed-stderr MCP frame, sixteen
+CLI triage cases and four MCP triage cases. Every new binary retains native
+unmodified Go VCS, immutable oracle/input pins and the original finite
+compile/runtime/output bounds. The actual cancellation file joins the narrow
+artifact allowlist. Unix targets record 132 observations; Windows records
+111 applicable observations while its separate native-executable controls
+remain live. No zero-case substitute is used. The clean local 132-observation
+producer and its independent source/stream readback pass; current native
+132/111-observation acceptance remains required.
+
+
+At earlier clean `6f084b0070dff5664c2bd234a571e651d82f58bd`, the exact
+Go-absent workflow passes all 361 selected tests with zero failures. Its
+sole top-level ignored harness child is actually executed in all sixteen
+isolated consent cases by the passing parent and is never counted as
+skipped acceptance. All 25 CLI tests pass without Go; the same thirteen-case
+schedule comparison passes with private actual Go; strict CLI Clippy passes.
+All 102 CLI binary unit tests and three actual-live MCP comparators retain
+their `dd51bb0` proof, and all eight triage/projection tests retain their
+Go-absent/actual-live proof at `90c50c0`. Four complete native Rust suites
+pass at `85acc513` and all four 98-member/110-observation actual Go captures
+are independently verified. Their twelve newly retained raw manifests and
+scheduler streams match the artifact bytes in Git and autocrlf checkouts.
+Current six-target acceptance of the new readers and complete-workspace
+Go independence remain required. Issue #1131 stays open.
+
+
+The thirteen CLI schedule cases now select complete actual Linux2/Windows2
+outputs from native source `85acc513`, with native unmodified VCS and all
+1476 immutable input pins. Windows bytes are retained separately from Unix
+bytes; original Rust stdout/stderr/status and generated-file hashes remain
+compared. Explicit live mode executes the original finite Go producer with
+offline modules and unchanged process/capture bounds. Unrecorded macOS
+retains its existing Unix fixture pending actual native readback. A new
+control checks all four full native frames and rejects corruption, case loss
+and fabricated source/target identity. Local/current native acceptance is
+pending; the expected selected total becomes 361 tests. The first local
+reader run retained 23 passes and two failures because it incorrectly
+required empty producer stderr. Actual whole schedule captures retain
+the producer's case-summary diagnostics there; the reader now verifies those bytes against
+the measured length/SHA-256 instead. All per-case stderr comparisons stay
+unchanged, At clean `6f084b0070dff5664c2bd234a571e651d82f58bd`, corrected validation
+passes all 25 CLI tests without Go, the same thirteen-case comparison passes
+with private actual Go, and strict CLI Clippy passes.
+
+
+Actual 110-observation run `37167564927` at clean `85acc513` records complete
+MCP runtime frames on both Linux and both Windows hosts. All four downloaded
+98-member archives independently validate all 1476 immutable inputs, native
+Go 1.26.6/unmodified VCS, whole streams, case counts and hostile clock-path
+controls. All three MCP families are byte-identical to the retained actual
+Linux frames. Defaults now additionally validate the producing native
+manifest on these four hosts; macOS and explicit live mode retain actual Go.
+Original Linux provenance stays verified too. Existing corruption controls
+check truncated frames and fabricated target identities on all four native
+captures. At clean `dd51bb0`, all 102 CLI binary unit tests pass without Go, including
+all 98 MCP tests; the same three changed comparators pass with private real
+Go. Strict CLI Clippy also passes at `6f084b0`; current native reader acceptance
+remains pending.
+
+
+The Go-absent workflow now runs every core/engine/CLI library and binary
+unit test, replacing the narrow 98-MCP/two-writer selection. At clean
+`90c50c0`, 225 actual unit tests pass without Go and no failures occur. The
+existing isolated consent child is marked ignored only at top-level libtest:
+its passing parent actually launches and verifies all sixteen child cases
+with their separate umask/resource limits. It is never credited as skipped
+acceptance. The selected total becomes 360 passing tests (prior 235 less
+100 replaced tests plus 225 units). The exact full new Go-absent workflow
+passes at clean `2fd1645` with 360 passing tests and zero failures; its sole
+top-level ignored harness child is actually executed sixteen times by the
+passing parent. It contributes no skipped acceptance.
+Native six-target reader acceptance and complete-workspace independence
+remain open.
+
+
+The #1131 triage-service and oversized-projection defaults additionally bind
+their complete streams to all six actual native `0d1be282` recordings and
+194 immutable source/input hashes. Triage bytes match on every target;
+projection uses each target's measured amd64 or arm64 overflow results.
+Existing Linux provenance and every Rust service/state comparison remain.
+The corruption controls verify all six actual native full frames and reject
+truncation. At clean `90c50c01145359ce35f2e81ce78671c2cbb7e827`, all eight
+affected triage/projection tests pass with Go absent and in private actual
+live-Go mode. Strict core Clippy passes. The selected workflow remains 235
+tests; unchanged other-family proof is retained from `0cfba7c`/`48fd77c`.
+Current native reader acceptance is pending; no row is promoted.
+
+
+Actual source `344dfaae` native grant captures on Linux amd64/arm64 and
+Windows amd64/arm64 are independently verified (82 complete archive members
+each). Their four raw manifests, all 48 process streams and all twenty
+whole consent records are retained byte-for-byte. Grant defaults now use
+these measured records on those four targets; macOS and explicit live mode
+continue the actual Go producer. Native Windows mode `0666` is measured,
+and Unix retains `0600`; no Windows private ACL assertion is replaced.
+The existing corruption control also checks all four provenances. At clean `48fd77c`, all 24 CLI tests pass with Go absent, the same populated
+grant comparator passes with private actual Go, and strict CLI Clippy passes.
+All 72 Git blobs also match the actual captures under autocrlf checkout. The
+selected workflow count remains 235; unchanged other-family proof is retained
+from `0cfba7c`. Current native Rust acceptance remains pending.
+
+The current #1131 Windows MCP jobs rejected CRLF conversion of embedded
+broker YAML before validating the cached stream. All 1283 embedded broker
+inputs now have explicit LF checkout attributes, and the pinned SQLite
+fixture is explicitly binary. All 1476 inventory members have LF or binary
+attributes; the source-hash and corruption checks remain unchanged. Native
+Windows rerun acceptance remains pending.
+
+The #1131 Linux-amd64 MCP reader preparation additionally uses actual complete
+clock/auto-confirm/gap responses from clean `f0a91ab`, bound to all 1476
+source/input pins and native unmodified binary metadata. Other native targets
+and explicit live-Go mode still execute the actual producer. The complete
+MCP unit group is added to the Go-free workflow. At clean `0cfba7c`, all
+98 MCP unit tests and the exact full 235-test workflow pass with Go absent;
+all three changed Go-backed comparisons also pass in private actual live-Go
+mode, and strict CLI Clippy passes. Native acceptance remains pending.
+
+The opt-in actual-native capture preparation additionally records complete
+MCP clock/auto-confirm/gap and CLI schedule outputs (110 observations total),
+with native VCS/source/input pins and hostile-config controls. These are
+producer changes pending validation; no Rust default is switched by capture.
+
+The opt-in native freeze artifact allowlist now includes all five actual
+synthetic CLI consent observations. Actual `b8faa96` file selection confirms
+82 complete members versus the prior 77-member selection; no private root
+or executable is included. Native Grant defaults remain unchanged pending
+current six-target capture/readback.
+
+The #1131 campaign/SQLite preparation additionally binds their byte-identical
+whole outputs to all six actual native `0d1be282` manifests, including the
+native tagged plan fixture and all seven storage Go controls. Original Rust
+side-effect, fixture and archived-source checks remain. The selected Linux
+Go-free count stays 137: 53 affected/shared-reader tests pass with Go absent
+at `2e16236`, all seventeen campaign/plan/SQLite tests pass with private real
+Go, and strict core/CLI Clippy passes. The unchanged other 84 tests retain
+their `a02907c` proof. Current native acceptance remains pending.
+
+The #1131 preparation additionally includes the independently verified native
+macOS arm64 capture (artifact `11288785362`, source `0d1be282`), so default
+LLM and review oracles now bind complete measured records on all six targets.
+Review validates native argv/status/full streams; a six-record corruption
+control is added. Grant retains its separate Linux-only frozen default.
+The selected Linux Go-free workflow contains 137 tests: 113 other-family
+tests pass at `a02907c`, and corrected 24 whole CLI tests pass at `32f897a`.
+The same twelve LLM and three review tests pass with private actual Go; strict
+core/CLI Clippy passes. Current six-target Rust acceptance remains pending. The old native Mac scheduler
+failure is retained; no row or cutover gate is promoted by this preparation.
+
+The #1131 LLM preparation now binds default observations to five independently
+downloaded native Go manifests (Linux/Windows both architectures and macOS
+Intel) from `37158381207` at `0d1be28`. All 65 archive members, 194 source/input
+hashes and seven whole LLM outputs are verified; source/target mutation
+controls are added. The Rust provider/retry/redaction behavior stays live.
+Mac arm64 retains actual Go until its capture is available, and modified
+native Rust acceptance is pending. This adds one control to the selected
+Go-free workflow (136 tests) and does not promote a contract row.
+
+The #1131 preparation also proves the entire 23-test `command_surface` binary
+with Go absent on native Linux/amd64 at clean `b8faa96fec95ddfffe0776ceea0d83579f639455`:
+the 175-case CLI corpus, thirteen scheduler/file-manifest cases and populated
+status/tick, profile, plan, manual-task, review and grant paths retain their
+original comparisons. The recorded umask 022 is explicit; the first local
+restrictive-umask failure is retained. The workflow expands from 116 to 135
+tests across its selected Go-free Linux families without dropping a prior
+test. Native Windows and Mac live-oracle paths remain; no contract row or
+retirement gate is promoted by this local preparation.
+
+The #1131 neutral freeze preparation records actual Go 1.26.6 observations for
+32 timestamp and eight confirmation-URL inputs at clean source
+`aa2dd0f31d30061b5ed66e7638a0dcddde060009`. Default neutral-package tests read
+the same observed cases without Go; input/output hashes and three corrupted
+observations protect the corpus. Existing TIME/confirmation acceptance is
+retained. This does not promote CUT-005, complete all runtime-oracle freezing,
+or establish release/native cutover acceptance.
+
+The same preparation freezes 15 actual identity/crypto Go requests and their
+complete output/status at that capture source, including five tampering
+rejections and Go reads of actual Rust writers. Exact request lookup and
+input/output hashes reject fabricated oracle answers. The original 21 core
+integration tests remain selected; one added control checks the complete
+15-case corpus and rejects an unknown request. Two private tests reproduce
+complete writer bytes with existing deterministic helpers. Production
+randomness and existing ID/CRY acceptance are unchanged. These selected
+tests, rather than the complete core suite, are covered by the Go-free job.
+The Triage-Service family also defaults to an actual four-operation whole
+Go output captured at clean `812cc7ee7c7d6b4021c7259f9cda6923efa2fd98`. Its
+original source pins and persisted-effect comparisons remain unchanged;
+five original tests plus a two-mutation control pass locally without Go.
+This preparation does not promote DOM-004/CLI-022 or their prerequisites.
+Projection boundary freezing remains open until actual native AMD64 and ARM64
+captures are reviewed. The opt-in native CI capture records seven projection
+inputs and four service operations with complete bytes, source/toolchain
+provenance and status. Neither cross-compilation nor local AMD64 prediction
+is accepted as ARM64 evidence.
+Actual Linux/Windows AMD64/ARM64 artifacts from run `37150753738` now verify
+the architecture-specific seven-case outputs at clean `6ab9537`; only
+`int64_max_payload` differs between architectures. The default projection
+test retains all seven rows, choosing the actual recorded architecture, and
+adds two corruption controls. Corrected Windows checkout and Mac/native
+acceptance remain pending. No DB or cutover row is promoted by this freeze.
+The scheduler-generator family also replays actual source-bound Go 1.26.6
+output for its six configurations and twelve legacy inputs at clean
+`3a3e250`. All six original Rust tests and a new two-mutation control pass
+locally without Go. Scheduler install/config, complete engine/native freeze
+and cutover remain open; existing scheduler contract statuses are unchanged.
+The Linux install/status/uninstall family additionally replays an actual
+twenty-case capture from clean `7ba198d` with umask 022. Its five existing
+tests and one corruption control retain complete file/mode/command/error
+comparisons. Other native OS install observations and the config family
+remain open; native capture now collects the full installation document.
+Run `37152018065` at `3a3e250` independently passed the complete Rust suites
+on Linux and Windows AMD64/ARM64. All four new artifacts have 49 matching
+source-file hashes, LF JSON inputs and unchanged whole Go product outputs;
+the earlier Windows CRLF failures remain recorded. Both Mac jobs and the
+subsequent scheduler changes are outside that four-target acceptance.
+The Linux config family replays six actual Go observations at clean
+`b4b5a56`, retaining all eleven original tests and adding one corruption
+control. Whole-output/source/input hashes and original `119ee9f` provenance
+remain strict. Mac live execution, Windows's existing capability gate and
+other runtime families retain their previous scope; no CFG or cutover row
+is promoted. Native capture now collects 37 observations per actual host.
+The Linux campaign plan/execution preparation records actual Go output and
+an actually executed source-bound plan-generator test at clean `30eeb38`.
+All four existing Rust tests retain complete serialized/persisted-effect
+comparisons, with two added integrity controls. Other OS live execution,
+native campaign capture and all domain/cutover acceptance remain separate.
+Actual run `37154503080` at `30eeb38` now supplies four native 37-case
+service/projection/install/config captures. Each artifact verifies 65 source
+files, eight whole runtime streams and the complete install document. The
+two Windows install documents are byte-identical and retain their measured
+OS-specific file/mode differences. Windows install defaults select this
+actual corpus with their native architecture manifest; original comparisons
+and the existing POSIX-mode capability rule remain intact. Local readback
+does not establish native execution of the new frozen Rust path.
+The Linux SQLite preparation replays an actual tagged Go snapshot at clean
+`f13f405` with complete immutable provenance, fresh/golden schemas, pragmas
+and row counts. Its three actual Go controls and four subcases are retained
+as raw observed logs; all ten Rust DB contracts and immutable-history
+mutation controls remain selected with one added corpus-integrity test.
+Other native OS observation acceptance and Go retirement remain separate;
+no DB or cutover status is promoted by this preparation.
+The opt-in native pipeline additionally collects actual campaign execution,
+the plan-generator's verified full byte fixture, and tagged SQLite
+snapshots/controls (41 product observations total). It retains raw Go test
+streams and the archived Python-generator binding. New per-target
+observations require native runs and review; no new native acceptance is
+inferred merely from the pipeline code.
+The Linux LLM error preparation records all seven actual Go fixtures at
+clean `54acd9b` and checks exact known arguments plus whole fixture/source
+hashes. All ten existing Rust loopback/retry/error/redaction/budget tests
+remain selected with one integrity control. Other OS defaults retain live
+Go through bounded owned temporary compilation; production behavior,
+existing LLM/native acceptance and cutover statuses are unchanged.
+Clean `6421dea` locally passed exactly 109 selected tests without Go in PATH
+and all eleven LLM tests in actual private-root pinned-Go live mode. The
+next native capture includes seven whole LLM outputs (48 total product
+observations), while other native OS/default and CLI/MCP runtime families
+remain open. This does not complete #1131 or promote CUT-005.
+
+The subsequent complete run `37174075472` at clean `30b38e2` retains
+all eleven disjoint shard inventories and all 718 outcomes. State projection
+passes (26 caught / 115 unviable / zero missed). Crypto has 6 missed of 117,
+consent 5 of 86, sanitization 35 of 272 and HTTP 11 of 102; the entire
+campaign correctly fails. The separate complete MCP result remains 331
+mutants, zero missed, and Miri plus all six fuzz targets pass. All original
+failed results remain retained.
+
+At clean `3ae43b06e930b19e9747b0218288776bcf458d54`, the second repairs
+pass 160 core/integration cases, 19 actual HTTP cases and the 25-case crypto
+selection. The two core and one HTTP top-level child harnesses are executed
+by their passing parents. Strict core/CLI all-target Clippy, formatting and
+the task-graph check pass. Eight additional actual compiled regressions are
+caught and restored, including worker/body-collector error signs, complete
+SSN filtering, short email masks, intermediate review limits, consent error
+translation/real kernel close failure and encryption detection. There are
+now 27 retained compiled negative controls across the two repair rounds.
+The complete outcome gate and all six campaign-verifier controls pass.
+
+Fourteen exact mutants are proved equivalent in the
+[classification report](rust-port/handoffs/mutation-equivalence-2026-10-04.md):
+array prevalidation, redundant terminal loops, empty Unicode segments,
+domain validation and fixed redaction resource/regex invariants. Seven
+cfg-disabled HTTP/Windows-close mutants are excluded only in the applicable
+Linux command. Both native target and the exact exclusions are sealed into
+its receipt and verified; the global configuration keeps these platform
+branches selected on their native targets. Native create/close operations
+retain their original semantics. Operation-local error boundaries test a
+real kernel EBADF without stale ownership, stop before chmod/publication,
+and preserve the old consent file and unrelated entries. New complete
+native mutation acceptance, all-six platform verification and the remaining
+fault/secret-sentinel evidence remain pending under issue #813. Per-mutant
+and per-job budgets stay at 30 seconds and 45 minutes.
+
+Task 8.5 preparation adds a native Linux mutation campaign over crypto,
+consent, HTTP authentication, redaction/path confinement and event projection.
+The pinned cargo-mutants 27.1.0, 30-second per-mutant timeout and 45-minute
+job limit remain unchanged. Crypto and sanitization each use four complete
+shards; the other categories each use one. A same-run verifier requires all
+eleven shards, the same producing source, identical complete catalogs,
+disjoint selections and actual execution of every selected mutant. Missing,
+overlapping, empty or incomplete campaigns fail. Full catalogs, outcomes,
+baseline logs and diffs are retained on success and failure.
+
+Run `37170739620` at `8797f2d47011fea6f008b8207c0bc94d9854ca39`
+exposed real test gaps: HTTP had 40 missed of 102, consent 20 of 82 and
+state transitions 3 of 141. Crypto hit the existing job deadline after 99
+of 117 generated mutants (8 missed); sanitization hit it after 180 of 272
+(63 missed). Both incomplete JSON documents retain null end times. All five
+original archives were checksum-verified and retained; none establishes
+acceptance. The separate MCP campaign passed its actual JSON gate with
+331 mutants: 298 caught, 12 unviable, 21 timeouts and zero missed.
+
+The added checks cover actual HTTP status/JSON/header/body-size behavior,
+equal-length wrong tokens, remote Origins, token permissions, shutdown and
+private bind policy; consent expiry, filename filtering and real filesystem
+races; projection diagnostics and zero chunk-size handling; standard/raw
+Fernet and legacy minimum frames; and redaction profile/path/email/SSN bounds.
+The public consent methods retain native filesystem operations through private
+callbacks that deterministically place real races between lookup and syscall.
+Local verification passes 151 core/integration tests and 18 HTTP tests; the
+two core and one HTTP top-level ignored child harnesses are actually invoked
+by passing parents. Strict core/CLI all-target Clippy passes. Nineteen actual
+compiled regressions are caught: both HTTP controls, all three missed state
+mutants, six consent controls and all eight missed crypto mutants. Source
+bytes are restored after each negative control. Four outcome and five
+whole-campaign verifier regression controls pass.
+
+The gate inspects complete actual outcomes, because timeout exit 3 takes
+precedence over missed exit 2 in cargo-mutants 27.1.0. It rejects any missed
+mutant, failed/missing baseline, incomplete/zero-case result or inconsistent
+count, and requires at least one actual caught mutant. New complete native
+mutation acceptance remains pending; remaining platform/equivalence cases
+are not hidden by broad exclusions. Final task 8.4 integration, native fault
+injection and secret-sentinel proof remain required under issue #813. No
+contract row, release/default switch or cutover task is promoted by this work.
+
+
+
+The reconciled [task graph](plans/2026-09-04-go-to-rust-task-graph.json)
+records the issue owner of every PARTIAL/TODO row in
+`execution_state.contract_issue_owners`, and owners of every unfinished task
+in `task_issues`. The current [ledger](migration/go-to-rust.md) explains the
+phase state. No row is promoted by this bookkeeping: phase 5 is complete,
+while phases 6–8 retain their documented acceptance gaps. Historical phase
+issues #807–#812 were replaced by the granular issues of #813.
+
+The CLI-023 manual-confirmation decision is an accepted deviation, not an
+unresolved browser-implementation requirement. Its remaining acceptance is
+owned by #1122. Fresh Rust signing/notarization belongs to #1129; the closed
+Go DMG fix #794 is not evidence for that gate. The executable reconciliation
+check is `python3 tests/test_rust_task_graph.py`.
+
+## Native evidence reconciliation — 2026-09-29
+
+[Run 36495092729](https://github.com/danieljustus/symaira-eraseme/actions/runs/36495092729)
+executed integrated commit `c4911a36f2336ce53470a105c5394cdba7bf1452` with Go
+1.26.6 and Rust 1.98.0. The observations below come from individual successful
+test records, not the workflow conclusion. “Six targets” means macOS, Linux
+and Windows, each on arm64 and amd64; “four Unix targets” excludes Windows.
+They supersede only the named older native-evidence gaps. Rows remain PARTIAL
+where other acceptance requirements are open; this is not cutover approval.
+
+| Rows | Executed tests | Native scope and remaining gap |
+|---|---|---|
+| DOM-008 | `mcp_json_normalizes_raw_host_agent_error_like_go` | All six targets: source-bound malformed host-agent stderr through MCP JSON; Windows replay additionally passed in run 37117363917 at 54d8c138. The new `host-agent-windows.yml` selects native malformed-stderr and source-bound PATHEXT differentials; results are pending. |
+| DOM-008A | `live_http_disconnect_cancels_provider_request_like_go`, `native_windows_disconnect_cancels_provider_request_like_go` | Provider disconnect and no persisted classification on all six targets. `live_http_disconnect_cancels_and_reaps_host_agent_like_go` passed on four Unix targets; `native_windows_disconnect_reaps_host_agent_like_go` additionally proves Go/Rust owned-process termination on both Windows targets in run 37117363917 at 54d8c138. `native_windows_disconnect_reaps_host_agent_like_go` now checks an owned live process handle before/after disconnect, server health and no persisted classification; native results are pending. |
+| MCP-007 | `go_oracle_http_wire_transcripts_match` | The later OS-neutral `native_http_complete_headers_and_bodies_match_go` compares complete status/header/body responses on all six targets; native completion candidate #1126 also selects it explicitly. Final candidate evidence remains pending. |
+| MCP-008, MCP-015 | `stdio_process_matches_go_initialize_id_and_params_corpus`, `stdio_process_matches_go_envelope_param_and_call_id_corpus`, `malformed_and_boundary_stdio_matches_source_bound_go_process`, `malformed_stdio_process_matches_go_errors` | All six targets. These are finite differential corpora; they do not prove broader fuzz coverage. |
+| MCP-011, MCP-012 | `native_windows_http_matches_checked_out_go` | Both Windows targets: bearer/Origin checks, non-loopback refusal and token rotation. Windows ACL parity and remaining bind diagnostics stay open. |
+| MCP-013 | `http_process_matches_core_contract_rotates_token_and_shuts_down_on_signals`, `signal_stops_accepting_before_in_flight_request_drains`, `native_windows_slow_header_timeout_matches_go` | Signals and listener-before-drain on four Unix targets; slow-header timeout on both Windows targets. Windows console-signal shutdown remains open. |
+
+## MCP parser hardening checkpoint (2026-10-02, #1125)
+
+`scan_json_value` now preserves the actual parser error context rather than
+translating serde's line-relative diagnostics afterward. The pinned Go 1.26.6
+process oracle has 670 cases, including the unchanged 138-case baseline,
+20 syntax/EOF regression probes and all 256 byte values in object-key and
+escape positions. `go_syntax_oracle_matches_buffered_and_chunked_streams`
+executes all 666 explicit-byte inputs against buffered and one-byte-read
+production streams. `malformed_and_boundary_stdio_matches_source_bound_go_process`
+executes all 670 cases through the native Rust CLI. Both checks and all 31
+parser/stream tests pass on local macOS arm64, with strict all-target CLI
+Clippy. Fixture `--check` and corruption controls are read-only.
+
+`stdio_primitive_waits_for_lookahead_or_eof` additionally pins Go's live decoder
+boundary: scalars need a following byte or EOF, while objects/arrays do not.
+Its exact read/write ordering assertions reproduce the old eager-scalar defect
+without timing assumptions. A readiness-synchronized probe of both actual
+processes confirmed the finding and matches on all nine token forms afterward.
+
+MCP-008/MCP-015 now pass their scoped gates on immutable source
+`91af942ac72449771871771e02aa5eaae64e9c6e` (merged by #1135 as
+`adeb6b12341a38873a40fefec25621e845d7756a`). [Native run 37007678845,
+attempt 2](https://github.com/danieljustus/symaira-eraseme/actions/runs/37007678845)
+passed all six targets; each job log contains the four named process tests
+above, including the 670-case replay. The first Intel attempt failed on an
+unrelated HTTP fixture port collision, retained under #1136.
+
+[Hardening run 37007682140](https://github.com/danieljustus/symaira-eraseme/actions/runs/37007682140)
+executed Miri, all six configured fuzz targets and the MCP mutation gate.
+The MCP production-parser fuzzer completed 4,536,509 executions in 121 seconds
+with a 120-second configured budget. The mutation campaign tested 331 mutants:
+298 caught, 12 unviable, 21 timeouts, zero misses. Timeouts are not counted as
+caught. This is bounded parser-hardening evidence, not an exhaustive proof or
+a release/cutover claim. The source-bound mutation corpus has 128 deterministic
+seeds; the historical 16-seed count below is superseded.
+
+## Phase 1 execution evidence
+
+Tasks `1.1`–`1.4` are implemented and reviewed on branch
+`agent/issue-803-phase1-foundation` at
+`dabb907b56da8d90d743de013e31628f9278bc0f`.
+
+| Task | Evidence | Status |
+|---|---|---|
+| 1.1 | Pinned Rust 1.98 workspace, three crates, Cargo.lock, shadow binary | PASS |
+| 1.2 | Neutral Go↔Rust harness with process/filesystem/SQLite/HTTP/MCP comparisons | PASS |
+| 1.3 | Dual-language Make targets with isolated outputs and shell-safe overrides | PASS |
+| 1.4 | SHA-pinned Rust PR/native CI, audit/deny/coverage handling, Cargo Dependabot | PASS |
+
+All local Go/Rust/Parity gates and the independent specification and
+quality/security reviews passed. PR #831 merged the phase as `24126f0` and
+issue #803 is closed.
+
+## Phase 2 execution evidence
+
+Tasks `2.1`–`2.4` are implemented and independently reviewed on branch
+`agent/issue-804-phase2-foundations`; implementation head
+`095eb5051ae90f209855f07e3c197326a1cab6f3` passes the local Go, Rust, parity,
+Cargo-deny and Windows compile gates.
+
+| Task | Evidence | Status |
+|---|---|---|
+| 2.1 | Deterministic version/build metadata and exact Go CLI bytes | PASS |
+| 2.2 | Time and confirmation pure functions with committed Go differential oracle | PASS |
+| 2.3 | Configuration precedence, native paths and hardened executable Go oracle | PASS |
+| 2.4 | 51-node Clap tree; 144 exact CLI cases; 22 deferred CLI cases fail closed | PASS |
+
+The Go production route remains unchanged until the later cutover phase.
+
+## Phase 3 execution evidence
+
+Tasks `3.1` and `3.2` were implemented and independently reviewed at
+`b3b7ce642944c4fd0c123150e25d5d990f043b05` and
+`4a64892d5eaa0c5f435d4ceb2ce42e28a8ec449c`. The schema-v1 models, strict
+validation, embedded 1,277-broker corpus, filters and validated atomic sync
+pass locally in Go and Rust. Both specification reviews are `PASS`; both
+quality/security reviews are `APPROVED`. Task `3.3` is independently approved
+at `9fb768805de213972db6f5437f1dd218e09e88d9`; all 11 canonical templates
+match the external golden fixture byte-for-byte with bounded rendering.
+Task `3.4`
+is independently approved at `0cfa8c0a5dccd0b189ad2cbbc076f53eab38ded2`;
+the shared redaction corpus, profile-aware byte behavior, bounded review and
+capability-safe file reads pass locally. Phase 3 was integrated by #870 as
+`fa366dca`; its Go reference remains pinned and executable. Phase 3 is
+integrated, but its later cutover rows remain governed by the matrix below.
+
 Comparison modes: **byte** = raw byte equality; **semantic** = parsed equality
 with only documented normalization; **side-effect** = status plus filesystem,
 SQLite, network transcript or process behavior.
@@ -18,125 +867,150 @@ SQLite, network transcript or process behavior.
 | ID | Seam | Contract / expected output or side effect | Go oracle / input fixture | Planned Rust/parity test | Mode | Platforms | Status |
 |---|---|---|---|---|---|---|---|
 | BASE-001 | baseline | Go format/test/lint/vet/build | `make fmt-check test lint vet build` | pre-flight script | side-effect | macOS/Linux | PASS |
-| BASE-002 | baseline | exact coverage gate | `make coverage` | retain Go gate until retirement | semantic | Linux | PASS (76.23%) |
+| BASE-002 | baseline | exact coverage gate | `make coverage` | retain Go gate until retirement | semantic | Linux | PASS (78.16%, 6,934/8,871 statements on native Linux aarch64 at `92a573ba`; 75% gate) |
 | BASE-003 | baseline | binary size/startup/RSS and release asset manifest | `v0.12.1`; `scripts/capture-go-baseline.sh` | `rust-tests/parity/baselines/v0.12.1.json` | semantic | macOS arm64 | PASS |
-| CLI-001 | CLI | root help and command ordering | `symeraseme --help` | `cli_root_help.snap` | byte | all | TODO |
-| CLI-002 | CLI | root `--version` | `symeraseme --version` | `cli_root_version.snap` | byte | all | TODO |
-| CLI-003 | CLI | `version` text | `symeraseme version` | `cli_version_text.snap` | byte | all | TODO |
-| CLI-004 | CLI | `version --json` schema v1 | `symeraseme version --json` | `cli_version_json.snap` | byte | all | TODO |
-| CLI-005 | CLI | global `--output text|json` inheritance | command corpus | `cli_output_modes.json` | byte | all | TODO |
-| CLI-006 | CLI | unknown command/flag, usage and exit code | command corpus | `cli_invalid_args.json` | byte | all | TODO |
-| CLI-007 | CLI | shell completion: bash/zsh/fish/powershell | `completion` commands | completion snapshots | byte | all | TODO |
-| CLI-008 | CLI | hidden deprecated `serve` alias and stderr notice | `serve --stdio` | alias fixture | byte | all | TODO |
-| CLI-009 | CLI | `config show` text/JSON | isolated config trees | config CLI cases | byte | all | TODO |
-| CLI-010 | CLI | `plan create/show/execute` flags/defaults | generated argv corpus | plan CLI cases | byte+side-effect | all | TODO |
-| CLI-011 | CLI | `brokers list/show` filters/defaults | embedded registry | broker CLI cases | byte | all | TODO |
-| CLI-012 | CLI | `registry list/validate/sync` | embedded/temp registry | registry CLI cases | byte+side-effect | all | TODO |
-| CLI-013 | CLI | `tick` and `status` | golden DB | tick/status cases | byte+SQLite | all | TODO |
-| CLI-014 | CLI | `schedule install/uninstall/status` | isolated HOME | scheduler CLI cases | byte+filesystem | native OS | TODO |
-| CLI-015 | CLI | profile init/show | fixed RNG/key fixture | profile CLI cases | semantic+filesystem | all | TODO |
-| CLI-016 | CLI | `render-template` | golden templates | template CLI cases | byte | all | TODO |
-| CLI-017 | CLI | `grant` issue/list/revoke/revoke-all/dry-run | fixed clock/RNG | consent CLI cases | byte+filesystem | all | TODO |
-| CLI-018 | CLI | dashboard/calendar/requests/events JSON shapes | golden DB | read-model CLI cases | byte | all | TODO |
-| CLI-019 | CLI | reports/dashboard files | golden DB | report CLI cases | byte+filesystem | all | TODO |
-| CLI-020 | CLI | manual task list/show/complete/cleanup | golden DB/temp files | manual-task CLI cases | byte+side-effect | all | TODO |
-| CLI-021 | CLI | review/redaction positional and flag aliases | redaction fixtures | redaction CLI cases | byte | all | TODO |
-| CLI-022 | CLI | inbox/classify/rebuttal argument aliases/defaults | mock adapters | reply CLI cases | byte+transcript | all | TODO |
-| CLI-023 | CLI | web form/auto-confirm dry-run and fallback | fake driver | web CLI cases | byte+side-effect | all | TODO |
-| CLI-024 | CLI | migrate inspect/run/verify/rollback/resume | migration fixtures | migration CLI cases | byte+filesystem | all | TODO |
-| CFG-001 | config | defaults | no config/env | unit + differential | semantic | all | TODO |
-| CFG-002 | config | global TOML path | isolated HOME/XDG | unit + differential | semantic | all | TODO |
-| CFG-003 | config | project `.symeraseme.toml` | isolated cwd | unit + differential | semantic | all | TODO |
-| CFG-004 | config | defaults→global→project→env precedence | conflict fixture | unit + differential | semantic | all | TODO |
-| CFG-005 | config | `SYMERASEME_DATA_DIR/DB_DIR/ENCRYPT_DB/RESOURCES` | env matrix | unit + differential | semantic | all | TODO |
-| CFG-006 | config | missing/malformed/unknown TOML values | config corpus | negative cases | byte+exit | all | TODO |
-| REG-001 | registry | manifest/schema version agreement | committed registry | registry conformance | semantic | all | TODO |
-| REG-002 | registry | all 1,277 embedded brokers load | `registry validate` | full-corpus test | semantic | all | TODO |
-| REG-003 | registry | four golden + one invalid fixture | `tests/fixtures/registry-contract` | shared fixtures | semantic | all | TODO |
-| REG-004 | registry | strict unknown fields and channel `oneOf` | negative corpus | property/unit tests | semantic | all | TODO |
-| REG-005 | registry | defaults, enums and optional verification | fixture corpus | model tests | semantic | all | TODO |
-| REG-006 | registry | skip `_` docs, filename=id, deterministic ID sort | temp registry | loader tests | semantic | all | TODO |
-| REG-007 | registry | filters/status/include-disabled/inactive | full corpus | filter snapshots | byte | all | TODO |
-| REG-008 | registry | HTTPS sync, validation and atomic replacement | mock server/temp dir | transcript+manifest | side-effect | all | TODO |
-| TMP-001 | templates | all 11 legal templates | `golden-templates.json` | shared golden test | byte | all | TODO |
-| TMP-002 | templates | missing/invalid variables and template names | negative corpus | error snapshots | byte | all | TODO |
-| RED-001 | redaction | PII regex and literal-profile replacement | package fixtures | shared text corpus | byte | all | TODO |
-| RED-002 | redaction | file review/interactive consent and safe paths | temp files | side-effect cases | byte+filesystem | all | TODO |
+| CLI-001 | CLI | root help and command ordering | `symeraseme --help` | `rust-tests/parity/cases/cli/behavior.json` `help-root` (plus the 51-case `help` category) | byte | all | PASS |
+| CLI-002 | CLI | root `--version` | `symeraseme --version` | `rust-tests/parity/cases/cli/behavior.json` `root-version` (`root_version` category) | byte | all | PASS |
+| CLI-003 | CLI | `version` text | `symeraseme version` | `rust-tests/parity/cases/cli/behavior.json` `version` (exact group) | byte | all | PASS |
+| CLI-004 | CLI | `version --json` schema v1 | `symeraseme version --json` | `rust-tests/parity/cases/cli/behavior.json` `version-json` (exact group; `schema_version` asserted) | byte | all | PASS |
+| CLI-005 | CLI | global `--output text|json` inheritance | command corpus | `crates/symeraseme-cli/tests/command_surface.rs`; `cmd/symeraseme/command_surface_test.go` | byte | all | PASS |
+| CLI-006 | CLI | unknown command/flag, usage and exit code | command corpus | `rust-tests/parity/cases/cli/behavior.json` `unknown_flag` (51), `unknown_command`, `missing_argument` (3) categories | byte | all | PASS |
+| CLI-007 | CLI | shell completion: bash/zsh/fish/powershell | `completion` commands | completion snapshots | byte | all | PASS |
+| CLI-008 | CLI | hidden deprecated `serve` alias and stderr notice | `serve --stdio` | alias fixture | byte | all | PASS |
+| CLI-009 | CLI | `config show` text/JSON | isolated config trees | config CLI cases | byte | all | PASS |
+| CLI-010 | CLI | `plan create/show/execute` flags/defaults | generated argv corpus | plan CLI cases | byte+side-effect | all | PASS (native). The frozen CLI corpus and source-bound populated plan cases replay `plan create/show/execute`; actual consented non-dry-run Go/Rust process pairs compare complete exit/stdout/stderr, persisted requests/events and manual tasks. Native run `37137509483` at branch source `cb3234c2291c8b243aeed8452e2bfce6f1938868` passed all six targets with the actual SMTP/campaign, retained plan/execution and CLI suites. The explicit `NetSmtpTransport` supplies the network sender when injected; default CLI/MCP no-sender behavior remains Go-compatible. Final PR checks and verified integration remain separate. |
+| CLI-011 | CLI | `brokers list/show` filters/defaults | embedded registry | broker CLI cases | byte | all | PASS (merged as `387a81d1`/#954; byte-exact against the Go-measured `rust-tests/parity/cases/cli/behavior.json` cases `operate-brokers-list`/`operate-brokers-show` in `crates/symeraseme-cli/tests/command_surface.rs::brokers_json_operations_match_source_bound_goldens`, plus the text filters, the `1273`/`138` counts and the `broker %q not found`/argument-count errors in `brokers_operations_match_go_text_filters_and_errors`) |
+| CLI-012 | CLI | `registry list/validate` (Go's CLI has no `registry sync`; that contract is REG-008) | embedded/temp registry | registry CLI cases | byte+side-effect | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets). `registry list`/`validate` were `deferred` stubs printing "not implemented in Rust"; both now byte-replay the Go oracle: `registry-list` (`1277 broker(s)`), `registry-list-json`, `registry-validate` (`OK: 1277 broker(s)`), `operate-registry-list` and `operate-registry-validate` in `command_surface.rs`. The bytes carry the contract that `brokers list` misses: no status filter and no `filters` object, so 1,277 brokers against 1,273 active, and the sorted-key envelopes `{brokers,count,schema_version}` / `{ok,schema_version,totals}`. Reverting the dispatch arms fails the replay, so the coverage is real. `registry sync` is not a CLI surface: the Go surface has no `sync` child under `registry` and `realRegistryCommand` adds only `list` and `validate`; the sync contract is the registry library path in REG-008. |
+| CLI-013 | CLI | `tick` and `status` | golden DB | `cli-tick-status/cases.json` (8 measured cases over frozen rows both sides apply) | byte+SQLite | all | PASS (`plan status` and `plan tick` are replayed byte-exactly: `plan status` prints Go's `%v` totals map (`Total: map[open:2 requests:3 resolved:1]`) and the full JSON report, `plan tick` prints `tick complete: N action(s)` and `{"actions":null,"dry_run":…,"success":true}`, and an invalid `--output` fails closed with Go's exact text; the one normalized value is `as_of` — a wall clock Go stamps with `time.Now()` and the CLI offers no injection point, so its RFC 3339 format is asserted instead of its value. Go's `plan tick` never applies separately: `--dry-run` only decides whether `run_tick` mutates and the batch limit stays disabled. `plan status` counts campaigns first, so the fixture seeds a campaign row) Bare `status` and bare `tick` were still `deferred` stubs and are now byte-replayed too: `status-json`, `operate-status` (both `status --output json`) and `operate-tick` (`tick --output json --dry-run`) match their recorded oracle bytes, and those bytes are identical to the `plan` variants (`operate-plan-status` and `operate-plan-tick` share the same SHA), which is why the two commands share one implementation each. Removing either dispatch arm fails the replay. That supersedes this row's earlier evidence, which covered only the `plan`-qualified commands. |
+| CLI-014 | CLI | `schedule install/uninstall/status` | isolated HOME + empty PATH | `cli-schedule/cases.json` (13 measured cases: dry-run text/JSON, unsupported platform for all three, launchd refusing a Python-era unit and replacing it once `--replace-legacy` is passed, install failing without `launchctl`, status text/JSON, status with an invalid `--output`, uninstall text/JSON) | byte+filesystem | native OS | PASS (all three commands leave the deferred stub: each is byte-exact against the committed Go capture, including stdout, stderr, exit code and every file the run leaves behind, hashed after folding only the volatile install root and the CLI's own resolved executable path. PATH is empty in both captures, so the answers are the CLI's own and no real `launchctl`/`systemctl`/`crontab` is touched. Two Go behaviours that this slice had pinned as measured were subsequently **fixed as a contract change** (#1000): `Status` now resolves launchd units under the label, the same name `Install`/`Uninstall`/the legacy scan use, so status no longer reports a removed unit as installed; and the generated units now carry the `generate-scheduler (Go)` marker, so the legacy scan no longer classifies this implementation's own output as a Python-era replacement candidate and a second `install` succeeds. Both defects were reproduced from the real Python-era generator, which emitted byte-identical launchd/systemd templates under the same file names — file names alone cannot separate the two eras, which is why the marker is the discriminator. The capture now covers 20 engine cases (including a foreign unit that still requires explicit replacement, and an install-then-uninstall-then-status case) and both entry points are pinned against it. `schedule status` still prints `success` in text form — Go discards the status payload unless JSON was requested. The legacy-replacement route, which `InstallOptions.ReplaceLegacy` gates and which no production surface could reach, is now threaded through the MCP schema, the contract handler and a `--replace-legacy` flag, and pinned by the case above (#1003); the CLI and MCP schema change also moved the frozen oracle corpus, which is re-frozen from this change's `main` commit rather than hand-edited) |
+| CLI-015 | CLI | profile init/show | fixed RNG/key fixture | profile CLI cases | semantic+filesystem | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets). The Go CLI corpus replays both entries and `init_profile_round_trips_through_show_profile` covers encrypted write/read and validation in an isolated data directory. |
+| CLI-016 | CLI | `render-template` | golden templates | template CLI cases | byte | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets). The recorded `operate-render-template` command replays byte-exactly; three focused normalization/error tests and TMP-001/002 cover the renderer. |
+| CLI-017 | CLI | `grant` issue/list/revoke/revoke-all/dry-run | fixed clock/RNG | consent CLI cases | byte+filesystem | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets). `events_and_grant_populated_paths_match_live_go` now builds the pinned Go CLI and compares real Go/Rust process status, stdout/stderr, token records, hashed filenames and Unix 0600 modes for issue, list aliases, positional/TTL flags, revoke, revoke-all and empty list (`afa3a0df`, focused integrated test passed). Random token bytes and issue timestamps are normalized; TTL differences are asserted on both sides. The frozen CLI corpus also covers dry-run. |
+| CLI-018 | CLI | dashboard/calendar/requests/events JSON shapes | golden DB | read-model CLI cases | byte | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets). The CLI corpus replays dashboard/calendar/requests; `events_and_grant_populated_paths_match_the_go_bodies` pins populated event JSON, after-event filtering, text mode and errors over frozen SQLite rows. |
+| CLI-019 | CLI | reports/dashboard files | golden DB | report CLI cases | byte+filesystem | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets). `filesystem_generators_match_go_observations` replays Go report, dashboard and scheduler filesystem manifests, including bytes and side effects; the thin CLI wrappers also replay in the command corpus. |
+| CLI-020 | CLI | manual task list/show/complete/cleanup | golden DB/temp files | manual-task CLI cases | byte+side-effect | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets). The command corpus replays empty list/show/complete/cleanup paths; populated task and artifact paths are exercised by `manual_tasks_populated_paths_match_the_go_bodies` and the SQLite timestamp tests. |
+| CLI-021 | CLI | review/redaction positional and flag aliases | redaction fixtures | redaction CLI cases | byte | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets). The recorded `operate-review` case remains in the CLI corpus, and `review_positional_and_path_aliases_match_the_live_go_cli` runs eight isolated live Go/Rust process cases: missing path, `--path`, positional precedence, text/JSON and inherited output modes, missing file, and invalid format. It requires successful redaction on four paths, exact exit/stdout/stderr and unchanged input; passed at `fe9250a`. |
+| CLI-022 | CLI | inbox/classify/rebuttal argument aliases/defaults | mock adapters | reply CLI cases | byte+transcript | all | PASS (six native targets). Integrated main `a1f4c2071abfad38032003b5ca68ca8c2ddc3614` passed native reply-triage run `37445056541` on Linux amd64/arm64, macOS arm64/amd64 and Windows amd64/arm64 (nine nonzero test groups per Unix host, seven per Windows host, zero empty groups) after #1119 (`ee03eb27`) and #1122 integration. Earlier history: Real `poll-inbox` CLI adapter and invalid `--since` replay source-bound Go cases; Both reply-triage wrappers replay the source-bound local-agent Go corpus; its `classify-agent-invalid-utf8-stderr` process case compares exact Go/Rust exit, stdout and raw stderr bytes after an invalid UTF-8 host-agent failure. The frozen CLI corpus selects all 175 cases after the Rust llmkit chat transport landed (`e8a8c96`); native targets remain open. #1120 adds a six-target native executable-agent gate selecting all sixteen retained CLI inputs and eight raw MCP/side-effect cases; results are pending. |
+| CLI-023 | CLI | web form/auto-confirm dry-run and fallback | fake driver | web CLI cases | byte+side-effect | all | PASS (native). `operate-run-web-form` and `operate-auto-confirm` replay the isolated Go observations; stored-reply `auto_confirm` compares source-bound Go MCP responses and persisted manual-task/event effects. The accepted #809 decision keeps confirmation clicks as manual tasks and defers the browser executor; it is recorded in `CHANGELOG.md`. Run `37137670878` at branch source `28f13ac1b09caf3b930c89714de27718ef3cdad0` passed migration, CLI and consented manual-fallback execution on all six native targets, with clean PR merge source `69c5724c32d64a66ffa71a7f91ddabb5ac1335e2`. Final PR integration checks remain separate. |
+| CLI-024 | CLI | migrate inspect/run/verify/rollback/resume | migration fixtures | migration CLI cases | byte+filesystem | all | PASS (native). The migration CLI/filesystem corpus and 500-case Go JSON oracle pass. Run `37137670878` at branch source `28f13ac1b09caf3b930c89714de27718ef3cdad0` executed all eight actual backup/restore cases on Linux, Windows and macOS amd64/arm64 with checksum/digest-verified official native Go v0.12.1 archives and clean committed-harness bytes. Go reads three schema-v1 requests, rejects Rust-written schema v2, and reads the same three after the separate pre-Rust backup restore; Rust-created request 4 is absent and a partial two-request restore is rejected. Real Linux namespace/Landlock and Windows AppContainer/Job/SID-scoped WFP controls execute; Windows raw artifact `11279253544` independently verifies all stream hashes, TCP/UDP error 10013, child error 5, timeout 124 and complete owned cleanup on every command. See `docs/rust-port/backup-restore-rehearsal.md`. Post-backup writes are lost by this rollback path. Production-data restore, publication, default cutover and Go retirement remain separate gates. |
+| CLI-025 | CLI | `poll-inbox` real IMAP adapter, alias flags and errors | recorded Go CLI corpus, fake IMAP transcript | CLI process replay + transport parity | byte+transcript | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets). The live CLI adapter routes into the production Rust IMAP dialer; source-bound Go cases for a refused local connection and invalid `--since` replay byte-exactly. The nine-case MCP handler and eleven-case IMAP transport corpora exercise inbox policy and wire behavior without a paid provider. |
+| CFG-001 | config | defaults | no config/env | unit + differential | semantic | all | PASS |
+| CFG-002 | config | global TOML path | isolated HOME/XDG | unit + differential | semantic | all | PASS |
+| CFG-003 | config | project `.symeraseme.toml` | isolated cwd | unit + differential | semantic | all | PASS |
+| CFG-004 | config | defaults→global→project→env precedence | conflict fixture | unit + differential | semantic | all | PASS |
+| CFG-005 | config | `SYMERASEME_DATA_DIR/DB_DIR/ENCRYPT_DB/PORT/ALLOW_REMOTE` | env matrix | unit + differential | semantic | all | PASS |
+| CFG-006 | config | missing/malformed/unknown TOML values | config corpus | negative cases | byte+exit | all | PASS |
+| REG-001 | registry | manifest/schema version agreement | committed registry | registry conformance | semantic | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets) |
+| REG-002 | registry | all 1,277 embedded brokers load | `registry validate` | full-corpus test | semantic | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets) |
+| REG-003 | registry | four golden + one invalid fixture | `tests/fixtures/registry-contract` | shared fixtures | semantic | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets) |
+| REG-004 | registry | strict unknown fields, channel `oneOf` and `format: uri` | negative corpus | property/unit tests | semantic | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets). `format: uri` was an annotation, not a rule: `validURI` accepted any non-empty string, and the Rust port mirrored that deliberately. The corpus reason is gone — the 54 non-URI values were corrected (46 email-as-`web_form` entries reclassified to `email` channels, 8 URL-plus-annotation strings split into a clean URL plus `notes`; scripts in `scripts/`) — so both sides now enforce an absolute http(s) URI with a host and no whitespace or control characters. Evidence: the full 1,277-broker corpus loads under the strict rule, and `internal/registry/uri_contract_test.go` plus `registry_contract.rs::non_uri_web_form_values_and_unsafe_schemes_are_rejected` reject all 54 legacy values along with `javascript:` and `file:///etc/passwd`. The negative controls fail against the old permissive implementation, so they demonstrably guard the rule. |
+| REG-005 | registry | defaults, enums and optional verification | fixture corpus | model tests | semantic | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets) |
+| REG-006 | registry | skip `_` docs, filename=id, deterministic ID sort | temp registry | loader tests | semantic | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets) |
+| REG-007 | registry | filters/status/include-disabled/inactive | full corpus | filter snapshots | byte | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets) |
+| REG-008 | registry | HTTPS sync, validation and atomic replacement | mock server/temp dir | transcript+manifest | side-effect | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets) |
+| TMP-001 | templates | all 11 legal templates | `golden-templates.json` | shared golden test | byte | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets) |
+| TMP-002 | templates | missing/invalid variables and template names | negative corpus | error snapshots | byte | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets) |
+| RED-001 | redaction | PII regex and literal-profile replacement | package fixtures | shared text corpus | byte | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets) |
+| RED-002 | redaction | file review/interactive consent and safe paths | temp files | side-effect cases | byte+filesystem | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets) |
 | DB-000 | SQLite | production honors persistent default, DB_DIR and ENCRYPT_DB | isolated reproduction; issue #796 | fixed Go oracle test | side-effect | all | PASS |
-| DB-001 | SQLite | schema v2/table/index SQL and `user_version = 2` | fresh Go DB | schema dump comparator | byte/semantic | all | TODO |
-| DB-002 | SQLite | WAL, busy_timeout, foreign_keys | fresh connection | PRAGMA snapshot | semantic | all | TODO |
-| DB-003 | SQLite | read existing `golden-campaign.db` | committed fixture | Rust open/query test | semantic | all | TODO |
-| DB-004 | SQLite | projection fold and `(occurred_at,id)` order | `golden-projection.json` | shared golden test | byte | all | TODO |
-| DB-005 | SQLite | reports/plans/tick snapshots | four event-store JSON fixtures | shared golden tests | byte | all | TODO |
-| DB-006 | SQLite | NULL and three timestamp layouts | edge-case DB corpus | query/projection cases | semantic | all | TODO |
-| DB-007 | SQLite | invalid event append vs unknown replay skip | corrupt/forward fixtures | negative cases | side-effect | all | TODO |
-| DB-008 | SQLite | append+projection atomicity and rollback | forced failures | transaction tests | side-effect | all | TODO |
-| DB-009 | SQLite | lock/busy/concurrent readers+writes | process harness | contention tests | side-effect | native OS | TODO |
-| DB-010 | SQLite | interrupted initialization/migration/read-only DB | fault fixtures | recovery tests | side-effect | native OS | TODO |
+| DB-001 | SQLite | schema v2/table/index SQL and `user_version = 2` | fresh Go DB | schema dump comparator | byte/semantic | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets) |
+| DB-002 | SQLite | WAL, busy_timeout, foreign_keys | fresh connection | PRAGMA snapshot | semantic | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets) |
+| DB-003 | SQLite | read existing `golden-campaign.db` | committed fixture | Rust open/query test | semantic | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets) |
+| DB-004 | SQLite | projection fold and `(occurred_at,id)` order | `golden-projection.json` | shared golden test | byte | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets) |
+| DB-005 | SQLite | reports/plans/tick snapshots | four event-store JSON fixtures | shared golden tests | byte | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets). `reporting_contract.rs`, `campaign_plan_contract.rs`, `deadlines_contract.rs` and `projection_contract.rs` replay the shared Go fixtures over isolated SQLite stores; 25 tests passed at `ac0fbeb`. `tick_apply_contract.rs::golden_tick_histories_scan_and_persist_all_four_go_actions` replays Go's four event histories and golden actions, then checks scheduler events, payloads and projected status/counters; its four-test binary and the two Go conformance tests passed at `efc718b`. Raw Go/Rust reporting JSON and HTML bytes now replay over isolated stores, including zero, one and empty-first multi-campaign HTML; PlanCampaign/GetPlan and persisted PLANNED event payload bytes also replay a source-bound Go oracle. Integrated focused tests: reporting 6/6, plan 3/3 and filesystem replay 1/1 at `29d48317`. |
+| DB-006 | SQLite | NULL and three timestamp layouts | edge-case DB corpus | query/projection cases | semantic | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets) |
+| DB-007 | SQLite | invalid event append vs unknown replay skip | corrupt/forward fixtures | negative cases | side-effect | all | PASS (issue #889) |
+| DB-008 | SQLite | append+projection atomicity and rollback | forced failures | transaction tests | side-effect | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets) |
+| DB-009 | SQLite | lock/busy/concurrent readers+writes | process harness | contention tests | side-effect | native OS | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets) |
+| DB-010 | SQLite | interrupted initialization/migration/read-only DB | fault fixtures | recovery tests | side-effect | native OS | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets) |
 | CRY-000 | crypto | exact V1/V2/V3 raw headers are each 17 bytes | `internal/eventstore/encrypt.go`; issue #795 | `TestEncryptionHeaderContract` | byte | all | PASS |
 | CRY-000B | crypto | Python standard-Fernet and Go format collision is resolved with interoperable, distinct versioning | `python-final` + Go; issue #798 | Python/Go vectors complete; Rust vectors remain Phase 4 gate | byte | all | PASS (Python↔Go); Rust gated |
-| CRY-001 | crypto | Python-final standard-Fernet V1 decrypt | Python-generated vector | Rust decrypt vector | byte | all | TODO |
-| CRY-002 | crypto | Python-final standard-Fernet V2 decrypt | Python-generated vector | Rust decrypt vector | byte | all | TODO |
-| CRY-003 | crypto | Python-final standard-Fernet V3 decrypt | Python-generated vector | Rust decrypt vector | byte | all | TODO |
-| CRY-004 | crypto | corrected Go write format decryptable by Rust | fixed clock/RNG Go vector | bidirectional harness | byte | all | TODO |
-| CRY-005 | crypto | Rust write format decryptable by corrected Go | fixed clock/RNG Rust vector | bidirectional harness | byte | all | TODO |
-| CRY-006 | crypto | standard-Fernet and any distinctly-versioned Go compatibility parser reject truncation/tamper/wrong keys | mutation corpus | negative tests/fuzz seeds | semantic | all | TODO |
-| CRY-007 | crypto | decrypted temp dir/file modes and cleanup | isolated TMPDIR | filesystem manifest | side-effect | native OS | TODO |
-| CRY-008 | crypto | WAL checkpoint before re-encryption | write/close/crash corpus | data durability test | side-effect | all | TODO |
-| ID-001 | identity | encrypted profile Go→Rust→Go | deterministic vector | bidirectional harness | byte/semantic | all | TODO |
+| CRY-001 | crypto | Python-final standard-Fernet V1 decrypt | `tests/fixtures/event-store/crypto/golden-campaign-v1-python.db`, generated through `python-final` by `scripts/generate-crypto-fixtures.py` | `crates/symeraseme-core/tests/encryption_parity.rs::python_final_v1_fixture_matches_shared_go_plaintext` | byte | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets) |
+| CRY-002 | crypto | Python-final standard-Fernet V2 decrypt | `tests/fixtures/event-store/crypto/golden-campaign-v2-python.db`, generated through `python-final` by `scripts/generate-crypto-fixtures.py` | `crates/symeraseme-core/tests/encryption_parity.rs::python_final_v2_fixture_matches_shared_go_plaintext` | byte | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets) |
+| CRY-003 | crypto | Python-final standard-Fernet V3 decrypt | `tests/fixtures/event-store/crypto/golden-campaign-v3-python.db`, generated through `python-final` by `scripts/generate-crypto-fixtures.py` | `crates/symeraseme-core/tests/encryption_parity.rs::python_final_v3_fixture_matches_shared_go_plaintext` plus fixture-backed negative cases | byte | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets) |
+| CRY-004 | crypto | corrected Go write format decryptable by Rust | test-only Go V3 binary oracle using fresh CSPRNG material | `crates/symeraseme-core/tests/encryption_parity.rs::rust_writer_is_consumed_by_go_oracle_and_go_writer_by_rust` (Go writer → Rust reader) | byte | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets) |
+| CRY-005 | crypto | Rust write format decryptable by corrected Go | Rust V3 writer using OS CSPRNG salt and IV | `crates/symeraseme-core/tests/encryption_parity.rs::rust_writer_is_consumed_by_go_oracle_and_go_writer_by_rust` (Rust writer → Go reader) | byte | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets) |
+| CRY-006 | crypto | standard-Fernet and any distinctly-versioned Go compatibility parser reject truncation/tamper/wrong keys | mutation corpus | `crates/symeraseme-core/tests/encryption_parity.rs` + `fuzz/fuzz_targets/encryption_envelope.rs` | semantic | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets). 27 pinned cases — the nine mutations (`valid`, `malformed_header`, `short`, `short_token`, `wrong_key`, `hmac_tamper`, `gcm_failure`, `raw_standard_valid`, `raw_standard_tamper`) × V1/V2/V3 — replay in `cry006_table_consumes_every_pinned_go_oracle_case` against `tests/fixtures/event-store/crypto/cry006-go-oracle.json`, generated by `rust-tests/parity/oracle/cry006/main.go`: the oracle commit, the oracle source digest, the generator digest and every fixture digest are pinned, and `cry006_source_provenance_rejects_mutated_digest` proves that digest check is not vacuous |
+| CRY-007 | crypto | decrypted temp dir/file modes and cleanup | isolated TMPDIR | filesystem manifest | side-effect | native OS | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets). `crates/symeraseme-core/tests/storage_encrypted_lifecycle.rs` pins the decrypted temp file at `0600` inside a `0700` temp directory and proves file, lock and directory entry are removed on close (`encrypted_open_uses_canonical_path_and_private_sqlite_temp`), the cleanup after a failed open (`failed_store_open_removes_temp_lock_after_temp_deletion`), that a plain open does not chmod an existing canonical parent (`plain_open_does_not_chmod_an_existing_canonical_parent`) and four scavenger rules (`scavenge_preserves_registered_active_temp_even_when_old`, `scavenge_preserves_stale_sidecars_when_main_temp_is_locked`, `scavenge_retries_main_after_sidecar_cleanup_failure`, `scavenge_does_not_create_lock_for_recent_unregistered_temp`, `scavenge_preserves_unregistered_decrypted_temp_for_other_process`); mode assertions are `cfg(unix)`-only because the fixture is minted on macOS and replayed in the 3-OS matrix |
+| CRY-008 | crypto | WAL checkpoint before re-encryption | write/close/crash corpus | data durability test | side-effect | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets). `close_store_inner` (`crates/symeraseme-core/src/storage/encrypted_store.rs`) checkpoints the WAL before re-encrypting the temporary database; `storage_encrypted_lifecycle.rs::finalise_all_reports_an_active_store_and_close_keeps_wal_data` writes a WAL-resident row, closes the encrypted store and reads that row back from the reopened store — the assertion fails if the checkpoint is skipped. Crash recovery of an interrupted initialisation/migration stays with DB-010 |
+| ID-001 | identity | encrypted profile Go→Rust→Go | deterministic vector | bidirectional harness | byte/semantic | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets). `identity_interop.rs` executes the production Go oracle in both directions, checks canonical JSON and profile hashes, and rejects tampering; 4 tests passed on the integrated macOS source at `ac0fbeb`. |
 | ID-000 | identity | Python/Go profile path, serialized fields, hash bytes, and decrypt-only key lookup are frozen | Python fixture; issue #816 | identity interoperability/regression tests | byte/side-effect | all | PASS |
-| ID-002 | identity | master-key resolution order and aliases | fake env/keyring/symvault | adapter tests | semantic | native OS | TODO |
-| ID-003 | identity | no secrets in errors/logs | sentinel secrets | output scanner | byte | all | TODO |
-| ID-004 | consent | token filename/hash/content/expiry/command | fixed clock/RNG | shared cases | byte | all | TODO |
-| ID-005 | consent | 0700 dirs, 0600 files, atomic updates | isolated HOME | filesystem manifest | side-effect | native OS | TODO |
+| ID-002 | identity | master-key resolution order and aliases | fake env/keyring/symvault | adapter tests | semantic | native OS | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets). `identity_secret_resolution.rs` exercises cached/direct/passphrase/keyring priority, URI aliases, vault fallback and redacted failures with fake providers; 12 tests passed on the integrated macOS source at `ac0fbeb`. |
+| ID-003 | identity | no secrets in errors/logs | sentinel secrets | `crates/symeraseme-core/tests/identity_secret_resolution.rs` | byte | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets) |
+| ID-004 | consent | token filename/hash/content/expiry/command | fixed clock/RNG | `crates/symeraseme-core/tests/consent_api.rs` | byte | all | PASS (focused Rust contract; task 4.7 remains open) |
+| ID-005 | consent | 0700 dirs, 0600 files, atomic updates | isolated HOME | filesystem manifest | side-effect | native OS | PASS (native). `consent_api.rs` covers 0700 directory and 0600 token permissions, atomic writes and chmod-failure rollback; the focused integrated macOS test passed at `d112ca74`. Unix uses checked `nix::unistd::close`; Windows now consumes the file handle and calls `CloseHandle` once, returning `last_os_error` on failure. The portable Go-fixture test checks Windows successful-close plus rollback control flow. Native run `37121535781` at `21a4fca0` passed both Windows amd64 (`111198458769`) and arm64 (`111198458869`): four source-bound Go/Rust complete-tree byte/DACL/read-only differentials, an actual kernel null-handle close failure through the checked-close seam, open-old-file replacement rollback, the native consent API and portable Go cleanup controls. It closes the valid owned file once; it does not create an invalid owning File. Windows Go chmod inherits DACLs rather than translating 0700/0600 into an owner-only DACL. The repaired framework ACL observer completes in both native jobs; the original bounded PowerShell observation failure in run `37120919444` is retained. Unix consent production behavior is unchanged and retains its native evidence below; the six-target integration run `37115795106` also passed at the current main prerequisite `b58bd6b2` before the Windows-only production factoring. The native Linux aarch64 `consent_api` and atomic chmod/close rollback tests passed in the 497-test workspace at `92a573ba`. |
 | DOM-000A | domain | production `poll_inbox` uses a real adapter and persistent HWM | fake-server transcript; issue #799 | corrected Go oracle | side-effect | all | PASS |
 | DOM-000B | domain | production web form has an honest tested runtime/manual boundary | local executor contract + durable manual-task tests; issue #800 | `TestWebFormNoExecutorPersistsManualFallback`, `TestWebFormExecutorReceivesBoundedContextAndMapsEvidence`, `TestAutoConfirmCreatesManualConfirmationTaskWithoutClick` | side-effect | all | PASS |
-| DOM-001 | domain | deadlines/tick transitions | `golden-tick.json` | shared golden test | byte | all | TODO |
-| DOM-002 | domain | campaign plan and execution transitions | `golden-plan.json` | shared golden test | byte+SQLite | all | TODO |
-| DOM-003 | domain | reporting/dashboard aggregation | `golden-reporting.json` | shared golden test | byte | all | TODO |
-| DOM-004 | domain | reply classification/rebuttal mapping | broker reply fixtures | shared corpus | byte/semantic | all | TODO |
-| DOM-005 | domain | MIME bytes, headers, boundary, CRLF, recipients | fixed time/message ID | raw SMTP fixture | byte | all | TODO |
-| DOM-006 | domain | IMAP UIDVALIDITY/HWM/search/fetch policy | fake transcript | state-machine tests | side-effect | all | TODO |
-| DOM-007 | domain | OAuth2 state, PKCE, refresh and redaction | mock HTTP server | transcript/files | side-effect | all | TODO |
-| DOM-008 | domain | LLM provider descriptors, retries/errors | mock HTTP corpus | transcript tests | side-effect | all | TODO |
-| DOM-009 | domain | scheduler bytes/paths/install commands | isolated HOME + fake exec | native snapshots | byte+side-effect | macOS/Linux/Windows | TODO |
-| DOM-010 | domain | manual-task evidence/cleanup retention | temp files/DB | filesystem+DB | side-effect | all | TODO |
-| MCP-001 | MCP | `initialize` protocol version/capabilities/serverInfo | raw frame | raw frame test | byte | all | TODO |
+| DOM-001 | domain | deadlines/tick transitions: policy, due-request scan and applying actions | `golden-tick.json` (Go `TestGoldenTickConformance`, `TestApplyTickActionsWritesEvents`) | `crates/symeraseme-core/src/deadlines.rs` (`actions_for_candidate`, `run_tick`, `apply_tick_actions`), shared golden + apply tests | byte | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets). The four Go event histories replay through `run_tick` and `apply_tick_actions`; the test compares every golden action plus persisted scheduler event/payload and projected status/counters. Dry runs remain read-only. A positive CLI tick action initially exposed lower-case Rust field names where Go emits capitalized struct keys; `ef8ba9c` fixes the wire boundary and Go/Rust tests pin exact populated action JSON bytes. |
+| DOM-002 | domain | campaign plan (`PlanCampaign`), reads (`GetPlan`) and execution transitions | `golden-plan.json` plus live Go `campaign-execution` oracle | `crates/symeraseme-core/src/campaign.rs`, shared golden and source-bound execution test | byte+SQLite | all | PASS (native). Source-bound PlanCampaign/GetPlan bytes, seven pinned request timestamps, raw PLANNED/execution event payloads and complete projections match actual Go. Native run `37137509483` at branch source `cb3234c2291c8b243aeed8452e2bfce6f1938868` passed Linux, Windows and macOS amd64/arm64: the explicit real Go/Rust SMTP senders encounter a rejected recipient then a successful send against synthetic loopback servers, comparing complete transaction/MIME bytes with only the live Date header folded, results, persisted events and projected GetPlan. Eight ordinary protocol comparisons, one credential-echo privacy control, three private-root trusted/untrusted/expired STARTTLS cases and retained no-send/mixed/plan/CLI contracts execute on every target. Credentials are deliberately redacted rather than byte-equal in the echo control. Paid-provider and independent OS-store trust acceptance are not claimed; see `docs/rust-smtp-transport.md`. |
+| DOM-003 | domain | reporting/dashboard aggregation (`GetReportData`, `GetDashboardData`, `GetCampaignStatus`, `GetCalendar`) | `golden-reporting.json` (Go `TestGoldenReportingConformance`) | `crates/symeraseme-core/src/reporting.rs`, shared golden test | byte | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets). Four reporting aggregations replay the shared Go golden and tied-total ordering checks; `filesystem_generators_match_go_observations` replays report/dashboard HTML, CSV and JSON output files against Go manifests on the integrated macOS tree. |
+| DOM-004 | domain | reply classification/rebuttal mapping | broker reply fixtures | shared corpus | byte/semantic | all | PASS (six native targets). Integrated main `a1f4c2071abfad38032003b5ca68ca8c2ddc3614` passed native reply-triage run `37445056541` on Linux amd64/arm64, macOS arm64/amd64 and Windows amd64/arm64 (nine nonzero test groups per Unix host, seven per Windows host, zero empty groups) after #1119 (`ee03eb27`) and #1122 integration. Earlier history: Pure mapping, prompts and all six broker reply fixtures replay source-bound Go corpora. Core service `classify_reply`/`generate_rebuttal` and persisted `Service` calls now use an injected LLM closure, including no-client/error fallbacks. The oracle pins Go triage, replies and event-store source hashes and compares full outcomes, saved reply fields, ordered event records/payloads and stable projections with Rust; 19 focused integrated tests passed at `4af87d9d` after independent static review. The CLI wrappers and both MCP triage tools now replay real Go handlers with a local fake agent; production llmkit-backed non-streaming chat is ported and exercised only against fake-local HTTP. The #1120 six-target candidate explicitly selects mapping/prompts, persisted Go service effects, IMAP transcripts, sixteen direct native CLI and eight raw MCP process comparisons with required agent invocation controls. Native results and the #1119 trust prerequisite remain pending; this finite corpus does not claim every possible provider response. |
+| DOM-005 | domain | MIME bytes, headers, boundary, CRLF, recipients | fixed time/message ID | raw SMTP fixture | byte | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets). `smtp_parity.rs` replays source-hash-pinned Go MIME bytes, CRLF/header normalization, Message-ID/boundary, To/Cc/Bcc envelope order and validation errors over four synthetic cases, including conversion from a non-UTC input instant to local UTC. The retained MIME fixtures remain valid. The new explicit live `NetSmtpTransport` and actual Go/Rust campaign differential are now implemented; their native acceptance remains owned by #1118. |
+| DOM-006 | domain | IMAP UIDVALIDITY/HWM/search/fetch policy | fake transcript | state-machine tests | side-effect | all | PASS (native). Production IMAP implicit TLS/STARTTLS, LOGIN/XOAUTH2, modified UTF-7, UID search/fetch and HWM policy replay source-bound Go transcripts. Shared `email/tls.rs` loads platform roots, including valid Windows LocalMachine server-auth roots, while preserving explicit certificate-file/directory precedence. Run `37137506583` at branch source `d35ddca04abebe03e8a90fb77be97fb4129f7f74` passed all six native targets. Each installs its uniquely named CA in the actual OS store, verifies trusted/unrelated/expired chains across OAuth2 HTTPS, IMAP TLS and STARTTLS, removes the owned CA/trust entry and requires rejection in a fresh process without credential bytes. Both native Mac cleanup paths preserve all unrelated admin trust settings and their ownership/permissions. Mailbox and five IMAP transcript tests pass per target. See `docs/rust-email-crate-decision.md` for accepted source and retained failures; the finite cases do not assert every OS chain policy. Final head `b07e81d0` passed six native trust jobs (`37197122235`) and six complete Rust workspace jobs (`37199861723`); PR #1146 squash-merged as `ee03eb277ade28fd6deaef976f7d9bfc4db8a468` with an identical tested tree. #1119 is completed. |
+| DOM-007 | domain | OAuth2 state, PKCE, refresh and redaction | mock HTTP server | transcript/files | side-effect | all | PASS (native). OAuth2 state/PKCE/refresh/redaction and XOAUTH2 SASL-IR replay source-bound Go fixtures. The real HTTPS regression rejected the private CA before the default-Mozilla-root mismatch was repaired; both adapters now use shared platform certificates without a new dependency, with verification, bounded timeouts, no redirects and redaction retained. Run `37137506583` at branch source `d35ddca04abebe03e8a90fb77be97fb4129f7f74` passed Linux/Windows/macOS amd64/arm64: all twelve real-OS-store trusted/unrelated/expired/removed-CA cases execute, plus actual command success/exit-23/stall controls, ten mailbox, five IMAP and seven OAuth2 transcript tests. Both Mac architectures prove bounded owned trust-entry removal and new-process rejection of the formerly trusted issuer. No operator profile, live mailbox or paid provider is used. Final PR checks and verified main integration remain separate. Final head `b07e81d0` passed six native trust jobs (`37197122235`) and six complete Rust workspace jobs (`37199861723`); PR #1146 squash-merged as `ee03eb277ade28fd6deaef976f7d9bfc4db8a468` with an identical tested tree. #1119 is completed. |
+| DOM-008 | domain | LLM provider descriptors, retries/errors | mock HTTP corpus | `llm-provider-surface/cases.json` (8 resolution cases, 9 retry cases, 3 usage records, 7 hash inputs, all measured on the real Go implementation over frozen inputs) | side-effect | all | PASS (native). Provider descriptors/retries/usage and host-agent CLI invocations for Claude, Hermes and Copilot, timeout, exit and launch-after-detection errors replay the source-bound Go fixture through fake local executables. Host-agent discovery matches Go's `exec.LookPath` rejection of a relative PATH hit and lazy first-probe timing when PATH changes after client creation (`agent-path/current-relative-entry.json`). Windows lookup matches nine real Go 1.26.6 PATHEXT observations on both architectures, including defaults, excluded extensions, extensionless candidates and ErrDot. Run 37115382421 first reproduced the extensionless-candidate defect; the repaired source 54d8c138 passes run 37117363917. Host-agent failure handling trims and truncates invalid UTF-8 stderr as Go does before converting it to Rust's UTF-8 error string, with a separate source-pinned Go 1.26.6 process fixture (`agent-stderr/invalid-utf8.json`). The direct CLI `classify-reply` surface now preserves malformed UTF-8 host-agent errors as raw bytes; the source-bound CLI process corpus compares Go and Rust stderr byte-for-byte. MCP JSON is a separate serialization boundary, covered on all six targets by the source-bound process tests in the native evidence reconciliation above. The factory honors `SYMERASEME_AGENT_BACKEND`; six LLM surface tests passed at `ac0fbeb`. Anthropic/OpenAI/Ollama/openai-compatible non-streaming chat transports and direct/environment credential resolution replay five source-bound fake-local HTTP Go cases (`d355e3b2`); a separate local echo test proves API keys are redacted from errors and Debug output (`17607327`). Three more source-bound fake-local HTTP Go cases cover exhausted 429 retries, malformed success JSON and empty choices (`3d74a200`): Rust matches attempt counts and error classes, and exact message bytes where both parsers agree. Loopback HTTP cases cover 400 context overflow, 403 forbidden, 404 model_not_found and 500 provider_error. A source-pinned OpenAI 401 error-object case now matches Go’s conditional status-400/message-only refinement; the generic structured 429 case still preserves Go’s original rate-limit result. Malformed-envelope 403 cases also pin Go's full-response decode boundary: a wrong top-level `choices` type or boolean `choices[].finish_reason` keeps the original status/body instead of refining the neighboring error object. All seven provider-failure fixtures now regenerate byte-for-byte under Go 1.26.6 with pinned source hashes and pinned oracle source. Focused Rust tests match three attempts, provider classification and error text after redacting synthetic keys. No paid provider was invoked. Full workspace native run 37117425498 at 54d8c138 passed all six targets, including the recorded provider/retry/error fixtures; targeted Windows run 37117363917 also passed cancellation, all nine lookup cases and malformed-stderr MCP replay. This finite corpus establishes the listed contract, not every possible provider response. CoreKit #366 is closed; #1112 is resolved. |
+| DOM-008A | domain | MCP HTTP disconnect cancels host-agent and provider-backed triage | Go 1.26.6 source-pinned `agent-cancel/http.json` and `provider-cancel/http.json` | Go MCP request context → host-agent or llmkit provider; Rust handler, transport, and `mcp_http_process::live_http_disconnect_cancels_and_reaps_host_agent_like_go` / `live_http_disconnect_cancels_provider_request_like_go` | side-effect | macOS/Linux/Windows | PASS (native). Both Go oracles regenerate under Go 1.26.6 and compare source hashes/outcomes. Live-process gates run Go and Rust MCP HTTP servers against a blocking fake host agent or a synthetic loopback OpenAI endpoint; disconnecting the real TCP client reaps/closes the downstream request, leaves each server running, and persists no classification. The provider differential uses only synthetic credentials and local HTTP. Native run 37117425498 at 54d8c138 passes the full six-target workspace. Targeted run 37117363917 proves both Go and Rust Windows agent processes live before disconnect and terminated afterwards using owned kernel handles, with healthy MCP servers and no classification persisted; the four Unix host-agent gates and all six provider gates remain covered. |
+| DOM-009 | domain | scheduler bytes/paths/install commands | isolated HOME + fake exec | native snapshots | byte+side-effect | macOS/Linux/Windows | PASS (`Generate`/`WriteFiles` byte-exact against `rust-tests/parity/oracle/scheduler`, both directions reviewed for a path-traversal regression and fixed, #907; legacy-Python unit detection (`DetectLegacyPythonUnit`/`DetectLegacyPythonUnits`/`ScanLegacyPythonUnits`) byte-exact against the same oracle, reviewed and fixed (task 5.4 legacy-detection slice); Install/Uninstall/Status are ported byte-exactly against the isolated-HOME fake-exec oracle (task CLI-014, 20 cases; the #1000 contract defects in `Status`'s launchd path and the self-blocking re-install are fixed in both implementations and pinned by regression tests; the Windows-only rooted/drive-relative traversal case `is_safe_relative_filename_rejects_windows_rooted_and_drive_relative_forms` passed on windows-2025 and windows-11-arm in native CI run 36467919816 at `5b5ce7c8`) |
+| DOM-010 | domain | manual-task queue: create/list/get/complete, redacted evidence and artifact cleanup | Go `internal/manualtasks` tests | `crates/symeraseme-core/src/manualtasks.rs`, filesystem+DB tests | side-effect | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets). Core now owns Go-equivalent HandleList/Show/Complete/Cleanup service responses, and MCP delegates all four. Eight source-bound Go handler cases cover populated and missing tasks plus dry-run/apply/idempotent artifact cleanup. Integrated macOS: three focused CLI/MCP tests and six core contract tests passed at `96da417f`; the Go oracle ran at Go 1.26.6. The native Linux aarch64 `manualtasks_contract` and CLI/MCP manual-task tests passed in the 497-test workspace at `92a573ba`; Windows native filesystem evidence remains open. |
+| MCP-001 | MCP | `initialize` protocol version/capabilities/serverInfo | raw frame; `tests/fixtures/mcp-contract/initialize_cases.json` (78 measured cases) | `mcp/protocol.rs`, shared golden test | byte | all | PASS (merged; byte-exact against the Go stdio oracle) |
 | MCP-000 | MCP HTTP | bearer secret uses constant-time comparison and strict header parsing | auth corpus; issue #817 | `TestServeHTTPBearerAuthContract` | side-effect | all | PASS |
-| MCP-002 | MCP | exact 26-tool `tools/list` | `tools.list.json` | shared golden test | byte | all | TODO |
-| MCP-003 | MCP | 26 valid `tools/call` requests | request fixtures | fixture loop | byte/semantic | all | TODO |
-| MCP-004 | MCP | success content envelope | handler fixtures | raw frame test | byte | all | TODO |
-| MCP-005 | MCP | error codes/messages and SQLite sanitization | malformed corpus | raw frame test | byte | all | TODO |
-| MCP-006 | MCP | legacy `list_tools`, `status`, bare `redact_file` | raw corpus | raw frame test | byte | all | TODO |
-| MCP-007 | MCP | notifications and mixed/empty batch behavior | raw corpus | raw frame test | byte | all | TODO |
-| MCP-008 | MCP | ID types/null/invalid IDs and params | raw corpus | property/fuzz test | byte | all | TODO |
-| MCP-009 | MCP HTTP | POST-only, 5 MiB limit, content type | HTTP corpus | HTTP differential | byte+status | all | TODO |
-| MCP-010 | MCP HTTP | bearer auth exactness | `internal/mcp/server.go`; issue #817 | `TestServeHTTPBearerAuthContract` | byte+status | all | PASS |
-| MCP-011 | MCP HTTP | Origin/loopback/`--allow-remote` policy | host/origin matrix | native network tests | side-effect | native OS | TODO |
-| MCP-012 | MCP HTTP | token path/mode/rotation | isolated data dir | filesystem manifest | side-effect | native OS | TODO |
-| MCP-013 | MCP HTTP | SIGINT/SIGTERM and 5s graceful shutdown | process harness | signal tests | side-effect | native OS | TODO |
-| MCP-014 | MCP stdio | newline frames and zero stdout pollution | raw stream | raw stream comparator | byte | all | TODO |
-| MCP-015 | MCP stdio | malformed/truncated/multiple frames | fuzz corpus | parser tests/fuzz | byte+exit | all | TODO |
+| MCP-002 | MCP | exact 26-tool `tools/list` | `tools.list.json`; `mcp-002/` fixtures | `mcp/tools_list.rs`, shared golden test | byte | all | PASS (merged; 26 tools byte-exact, notifications silent, `list_tools` alias accepted) |
+| MCP-003 | MCP | `tools/call` dispatch through real Rust handlers for all 26 catalogue tools | Go `ContractHandler()`; `tests/fixtures/mcp-contract/mcp-003/cases.json` (8 measured cases), `mcp-003-store/{empty,seeded}-cases.json` (20 measured cases over `seed.sql`) and `mcp-003-poll/cases.json` (9 measured cases over `seed.sql` + `mailbox.json`) | `crates/symeraseme-cli/src/mcp/{tools_call,handler}.rs`, fixture loop plus shape tests | byte/semantic | all | PASS (all 26 catalogue tools have complete Go/Rust response evidence in native run 37137670713 on all six targets at 0980de4edd354b69f77ea5c86a0001ecc6b2d16f, clean merge b45637860246dc51ca02a5158326b14bfbf0af01: retained basic/store/mailbox/campaign/scheduler cases, 25 current-Go remaining-tool/error cases including the entire registry and HTML, six complete clock frames, four stored auto-confirm frames with effects, and eight actual native-agent MCP frames. Nine source hashes are verified for the new remaining-tool oracle. Scripted transports and accepted manual browser fallback remain explicit; OS trust and HTTP/console gates are separate. See docs/rust-port/handoffs/2026-10-03-mcp-all-tools-bytes.md. Final current-head checks and integration remain required.) |
+| MCP-004 | MCP | success content envelope | `mcp-result/` fixture (12 measured cases) | `mcp/envelope.rs`, fixture + unit tests | byte | all | PASS (whole success envelopes, including string/object/array/number/absent results, are compared as complete bytes in the retained 12 envelope/marker controls and actual full-tool responses on all six targets in run 37137670713 at 0980de4edd354b69f77ea5c86a0001ecc6b2d16f. HTTP transport remains scoped to MCP-009..013; final current-head checks and integration remain required.) |
+| MCP-005 | MCP | error codes/messages and SQLite sanitization | `mcp-envelope/`, `mcp-result/` fixtures | `mcp/envelope.rs`, `mcp/tools_call.rs` | byte | all | PASS (all four storage markers, panic and pass-through controls plus actual tool-specific failures and ten corrupt-database errors compare complete responses on all six targets in run 37137670713 at 0980de4edd354b69f77ea5c86a0001ecc6b2d16f. Structured SQLITE_NOTADB public spelling preserves Go sanitization; manual cleanup proves its filesystem-only boundary. Final current-head checks and integration remain required.) |
+| MCP-005A | MCP | invalid UTF-8 host-agent errors serialize as Go JSON strings | `mcp-agent-error-json/error.json` (Go 1.26.6 source hashes) | `mcp/envelope.rs`, `mcp/handler.rs`, `mcp/tools_call.rs`; real Rust stdio process replay | byte | macOS/Linux | PASS (the fixture drives the real Go `ContractHandler` and MCP stdio server, then compares the Rust process response byte-for-byte. Go escapes each invalid source byte as `\\ufffd`; Rust now retains raw error bytes through the tool handler and applies the same JSON encoding. The CLI still writes the same raw bytes to stderr per the CLI-022 process oracle. Native Windows execution remains open.) |
+| MCP-006 | MCP | legacy `list_tools`, `status`, bare `redact_file` | `mcp-002/`, `mcp-003/`, `mcp-006/cases.json` (12 measured cases) | `mcp/tools_list.rs`, `mcp/tools_call.rs`, `mcp/protocol.rs` | byte | all | PASS (the `list_tools` alias, the `status` alias default and the bare `redact_file` method pinned byte-exactly; the bare method keeps its own semantics rather than aliasing `tools/call` — the path may arrive as `{"path":…}` or `["…"]`, a bad argument *and* a handler failure are both `-32602` (with the sanitized message) where `tools/call` answers `-32603`, the result is returned without the content envelope, and a notification stays silent) |
+| MCP-007 | MCP | notifications and mixed/empty batch behavior | `mcp-envelope/`, `mcp-stream/` fixtures; live Go HTTP process | `mcp/protocol.rs`, `mcp/stream.rs`, `tests/mcp_http_process.rs::go_oracle_http_wire_transcripts_match` | byte | all | PASS (six native targets). Source `53a0e3684652f0676f02e2994bcd46fbeb9d83b2` passed targeted run `37128540191` and full Rust run `37128575147`: ten complete actual Go/Rust HTTP status/header/body transcripts, silent notifications/mixed and empty batches, validated Date-only normalization, retained duplicate headers and five deliberate comparator mutations. |
+| MCP-008 | MCP | ID types/null/invalid IDs and params | `initialize_cases.json`, `mcp-envelope/` fixtures | `mcp/protocol.rs`, `mcp/tools_call.rs` | byte | all | PASS (six-target source-bound parser replay and bounded hardening; see checkpoint above). `mcp_stdio_process.rs::stdio_process_matches_go_initialize_id_and_params_corpus` feeds all 72 non-parse-error Go initialize cases through the real Rust stdio process. `stdio_process_matches_go_envelope_param_and_call_id_corpus` now does the same for all 20 Go envelope cases, including tools/call string/null IDs, rejected bool/array/object IDs, null/array params and invalid parameter types; the MCP envelope oracle generator pins its Go source revision and path. The focused process tests pass byte-exactly with successful exit and empty stderr. A separate real-process mutation corpus covers all six parse errors plus four size/depth boundaries against Go 1.26.6 (`6ccd1a4`); the configured fuzz and mutation gates passed; the native evidence reconciliation above records these finite corpora on all six targets. The additive Go/Rust protocol ping now preserves empty result, ID and parameter behavior, with eight actual source-bound Go frames at `0bc6b051890340822448fa3846c96f70022b79ad`; the previous 670 process frames remain byte-identical. The pinned official three-scenario core subset passes for both backends locally at `a46bc2c07c0ae0f9f9c1d8ef35dc663b72e65c52`, after both failed ping at `d9a66fa`. The new official CI gate and six-native extended-corpus acceptance remain pending; see the ledger for exact upstream scope. |
+| MCP-009 | MCP HTTP | POST-only, 5 MiB limit, content type | HTTP corpus | HTTP differential | byte+status | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets). `mcp_http_process.rs` launches both real binaries and compares live HTTP wire responses, including method, content type, oversized declared and chunked bodies, and JSON-RPC framing. The integrated macOS HTTP/stdio process gate passed 12 tests at `00d31d14`. |
+| MCP-010 | MCP HTTP | bearer auth exactness | `internal/mcp/server.go`; issue #817 | `TestServeHTTPBearerAuthContract`, `mcp_http_process.rs` | byte+status | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets). The fixed Go contract test and integrated live Go/Rust HTTP process test cover missing, malformed and incorrect bearer tokens plus authenticated access, using constant-time comparison. The macOS process gate passed at `00d31d14`. |
+| MCP-011 | MCP HTTP | Origin/loopback/`--allow-remote` policy | host/origin matrix | native network tests | side-effect | native OS | PASS (six native targets). Source `53a0e368` passed runs `37128540191`/`37128575147`: bearer/Origin/loopback/remote policy and exact whole exit/stdout/stderr for mandatory occupied IPv4, occupied IPv6 and TEST-NET unavailable-address errors; Windows uses the same bounded US-English system-message formatting as Go. The initial Windows mismatch in `37124645649` remains recorded. |
+| MCP-012 | MCP HTTP | token path/mode/rotation | isolated data dir | filesystem manifest | side-effect | native OS | PASS (six native targets). Source `53a0e368` passed runs `37128540191`/`37128575147`. Both native Windows targets compare complete owner/group/DACL SDDL, inherited/protected parents, read-only flags, restart rotation, old-token rejection/new-token authentication and failed-replacement token/ACL/sentinel retention. Unix private-file mode/rotation and retained process contracts pass. |
+| MCP-013 | MCP HTTP | SIGINT/SIGTERM and 5s graceful shutdown | process harness | signal tests | side-effect | native OS | PASS (six native targets). Source `53a0e368` passed runs `37128540191`/`37128575147`. Both native Windows targets execute separate private-console Ctrl+C and owned-group Ctrl+Break against actual Go/Rust CLIs, requiring successful bounded exit and listener closure. Four Unix targets retain SIGINT/SIGTERM/listener-before-drain; both Windows targets retain the bounded slow-header timeout. |
+| MCP-014 | MCP stdio | Consecutive JSON values separated by whitespace — **not** newline frames (measured: a value may span lines, three values may sit on one line); one response per request, notifications silent, nothing else on stdout | Go `ServeStdio`; `tests/fixtures/mcp-contract/mcp-stream/cases.json` (13 measured cases) | `crates/symeraseme-cli/src/mcp/stream.rs`, raw stream comparator | byte | all | PASS (native CI: workspace suite and doctests green on all six targets at `5b5ce7c8`, run 36467919816; unix-gated cases ran on the four Unix targets). `mcp_stdio_process.rs` launches the real Rust shadow executable over a live pipe, checks responses arrive before EOF and asserts stdout contains only JSON-RPC frames; the source-bound 13-case Go stream fixture and 3 focused process tests pass. |
+| MCP-015 | MCP stdio | Malformed, truncated and multiple values in one stream | same oracle fixture (adjacent, truncated, junk, scalar and string cases) | `stream.rs` error cases; seeded mutations; `fuzz/fuzz_targets/mcp_stdio.rs` | byte+exit | all | PASS (six-target source-bound parser replay and bounded hardening; see checkpoint above). `mcp_stdio_process.rs` replays ten source-bound Go 1.26.6 malformed/adjacent/truncated cases with exact process exit, stdout and stderr; the fixtures live under `rust-tests/parity/oracle/mcp-stdio-errors/`. Six parse cases, four size/depth boundaries, and 128 deterministic seeded byte mutations replay the real Go 1.26.6 process byte-exactly. The new in-process libFuzzer target includes the production `protocol.rs` and `stream.rs` directly (only tool dispatch is stubbed), consumes only the input bytes, and has no filesystem/state dependency. Its ten checked-in seeds are copied from the source-bound Go error corpus; a current-source macOS arm64 run completed 330,402 executions in five seconds without a crash (`-max_len=65536`). This bounded run adds parser robustness evidence, not Go differential or native-platform proof. |
 | APP-000 | SwiftUI | `listTools()` parses raw `result.tools`, not call content envelope | exact Go response; issue #797 | `MCPClientToolsListTests` | semantic | macOS | PASS |
-| APP-001 | SwiftUI | binary discovery order and name | Swift unit tests | Rust binary fixture | side-effect | macOS | TODO |
-| APP-002 | SwiftUI | launch `mcp --host --port` | supervisor test | Rust E2E | side-effect | macOS | TODO |
-| APP-003 | SwiftUI | token read + authenticated tools/list/call | app tests | Rust E2E | semantic | macOS | TODO |
-| APP-004 | SwiftUI | app shutdown terminates backend cleanly | app/supervisor test | Rust E2E | side-effect | macOS | TODO |
-| REL-001 | release | six CLI archive names | v0.12.1 release manifest | artifact manifest test | byte | native matrix | TODO |
-| REL-002 | release | tar.gz/zip root contains `symeraseme`, LICENSE, README | released archives | archive inspection | side-effect | all | TODO |
-| REL-003 | release | `checksums.txt` format/content | v0.12.1 | checksum verifier | byte/semantic | all | TODO |
-| REL-004 | release | static/self-contained runtime expectations | released binaries | linkage inspection+smoke | side-effect | native OS | TODO |
-| REL-005 | release | Homebrew URL/name/install/version test | `Formula/symeraseme.rb` | tap dry-run/audit | side-effect | macOS/Linux | TODO |
-| REL-006 | release | DMG name and app bundle paths | v0.12.1 DMG | mounted DMG manifest | side-effect | macOS | TODO |
-| REL-007 | release | nested Rust binary Developer ID signature | release workflow | codesign verification | side-effect | macOS | TODO |
-| REL-008 | release | DMG container signature before notarization | issue #794 | codesign/notary proof | side-effect | macOS | BLOCKED #794 |
-| REL-009 | release | notarization/stapling and release-note truth | release workflow | notary/stapler checks | side-effect | macOS | TODO |
-| REL-010 | release | SBOM, audit, deny, provenance | new Rust workflow | artifact/security checks | side-effect | all | TODO |
-| CUT-001 | cutover | explicit `SYMERASEME_BACKEND=go` fallback | dual archive | process test | side-effect | all | TODO |
-| CUT-002 | cutover | Rust upgrade reads existing plain/encrypted data | copied Go user fixtures | upgrade suite | side-effect | all | TODO |
-| CUT-003 | cutover | rollback Go reads post-Rust data | Rust-created copies | rollback suite | side-effect | all | TODO |
+| APP-001 | SwiftUI | Rust-only bundled binary discovery order and name | Swift unit tests | `RustBackendIntegrationTests` and staged app | side-effect | macOS arm64/amd64 | PASS (candidate-bound native app). Exact source `4e33d57475f286e2add83324b30c66dbad801111`: [run 37653688590](https://github.com/danieljustus/symaira-eraseme/actions/runs/37653688590) stages the Rust-only app, asserts no `symeraseme-go`, and executes 42 Swift tests with zero failures on both macOS 26 arm64 and macOS 15 Intel. `testDefaultBundledRustLaunchAuthToolsAndShutdown` and `testExplicitRustBinaryLaunchAuthToolsAndShutdown` pass on both. Integrated merge `8d2db345a2e8cbaf13d2a2864eeeb38747fda37a` has the exact candidate tree `056f5c4837ff4a0b04ad113d0cd4cbf2d1908311`. This diagnostic app run does not establish signing/notarization, production DMG or other release-row acceptance. |
+| APP-002 | SwiftUI | launch `mcp --host --port` | supervisor test | Rust E2E | side-effect | macOS | PASS (local). The opt-in Swift E2E launches the integrated Rust HTTP binary through `ServerManager` on an isolated ephemeral port; the full 41-test Swift suite including this case passed again on the integrated `49eb79a8` Rust debug binary. |
+| APP-003 | SwiftUI | token read + authenticated tools/list/call | app tests | Rust E2E | semantic | macOS | PASS (local). The Swift E2E checks 401 without a bearer token, reads the per-run token through `MCPClient`, lists tools, calls `list_brokers` raw and typed, and verifies 1,273 active brokers. This found and fixed the client assumption that every valid tool result includes `success` and the model's `total`/`count` mismatch (`026c383`). |
+| APP-004 | SwiftUI | app shutdown terminates backend cleanly | app/supervisor test | Rust E2E | side-effect | macOS | PASS (local). The Swift E2E stops `ServerManager`, waits for process exit and restores shared app settings; 41 Swift tests passed again with the integrated `49eb79a8` Rust debug binary. |
+| REL-001 | release | six CLI archive names | v0.12.1 release manifest | artifact manifest test | byte | native matrix | PASS (published canary). Published canary prerelease `v0.13.0` (release run `37475999775`, source `780512f17d4dd434676d62539f81550ce048f77e`); independently downloaded and read back on 2026-10-06. The release carries exactly the six expected archive names `symeraseme_0.13.0_{darwin,linux}_{amd64,arm64}.tar.gz` and `symeraseme_0.13.0_windows_{amd64,arm64}.zip`, built natively per target. Earlier history: PARTIAL (native PR gate). The exact-head `79ef6a85` prerelease PR workflow passed all six native build jobs and the same-run archive verifier (8/8 checks, including plain-store switchback). `tests/verify_release_archives.py` accepted the six expected archive names from those binaries. The unsigned shadow archives are retained as a one-day workflow artifact; release routing still packages Go. |
+| REL-002 | release | tar.gz/zip root contains `symeraseme`, LICENSE, README | released archives | archive inspection | side-effect | all | PASS (published canary). Published canary prerelease `v0.13.0` (release run `37475999775`, source `780512f17d4dd434676d62539f81550ce048f77e`); independently downloaded and read back on 2026-10-06. Every tar.gz/zip root contains exactly `LICENSE`, `README.md`, `symeraseme` and the `symeraseme-go` rollback sibling (`.exe` on Windows); the darwin arm64 binaries report `symeraseme version 0.13.0` directly and via `SYMERASEME_BACKEND=go`. Earlier history: PARTIAL (native PR gate). The exact-head `79ef6a85` workflow staged six real Rust binaries into archives and the same-run verifier accepted their root members and executable tar modes. Its synthetic negative controls reject duplicate names and symlink members. A signed, published release artifact remains unverified. |
+| REL-003 | release | `checksums.txt` format/content | v0.12.1 | checksum verifier | byte/semantic | all | PASS (published canary). Published canary prerelease `v0.13.0` (release run `37475999775`, source `780512f17d4dd434676d62539f81550ce048f77e`); independently downloaded and read back on 2026-10-06. `shasum -a 256 -c checksums.txt` verifies all six archives and the DMG; `sbom-checksums.txt` verifies all SBOM sidecars. Earlier history: PARTIAL (native PR gate). The exact-head `79ef6a85` same-run verifier accepted one SHA-256 line per staged Rust archive, exact names and matching digests. Published release checksums remain unverified. |
+| REL-004 | release | static/self-contained runtime expectations | released binaries | linkage inspection+smoke | side-effect | native OS | PASS (published canary). Published canary prerelease `v0.13.0` (release run `37475999775`, source `780512f17d4dd434676d62539f81550ce048f77e`); independently downloaded and read back on 2026-10-06. The same run's six native release-binary jobs ran version/help smoke and linkage inspection on the published binaries (Linux static, macOS system libraries only, Windows DLL allowlist). Earlier history: PARTIAL (native PR gate). The exact-head `79ef6a85` six-target workflow ran each Rust release binary's version/help smoke and native linkage inspection: Linux binaries had no ELF interpreter or shared-library dependencies; macOS linked only system libraries; Windows MSVC binaries passed the fail-closed DLL allowlist. Signed release runtime remains unverified. |
+| REL-005 | release | Homebrew URL/name/install/version test | separate tap `Formula/symeraseme.rb` | tap dry-run/audit | side-effect | macOS/Linux | PASS (published canary, dry run). `publish-homebrew.yml` dry run `37496131697` rendered the formula from the real `v0.13.0` assets (four versioned URLs and SHA-256 values, `bin.install "symeraseme", "symeraseme-go"`, version test; offline contract test passes), then installed it from a disposable local tap on macOS arm64/amd64 and Linux amd64/arm64: `brew install`, `brew test`, `symeraseme --version` and `SYMERASEME_BACKEND=go` all report 0.13.0. The public tap was deliberately not changed (still v0.12.1): canaries reach Homebrew only on stable promotion, which also requires rotating `HOMEBREW_TAP_GITHUB_TOKEN` (it returned `Bad credentials` on 2026-10-06). Earlier history: PARTIAL (local). An offline executable gate parses the separate current Go tap formula and checks four versioned macOS/Linux archive URLs, SHA-256 syntax, `bin.install "symeraseme"` and the version test; Ruby syntax passed (`378f1a1b`). Real Rust archive hashes, Homebrew install/version execution and native target audit require native Rust artifacts. |
+| REL-006 | release | DMG name and app bundle paths | v0.12.1 DMG | mounted DMG manifest | side-effect | macOS | PASS (published canary). Published canary prerelease `v0.13.0` (release run `37475999775`, source `780512f17d4dd434676d62539f81550ce048f77e`); independently downloaded and read back on 2026-10-06. `Symaira-EraseMe-0.13.0-macos.dmg` mounts with `Symaira EraseMe.app` containing `Contents/MacOS/{Symaira EraseMe,symeraseme,symeraseme-go}`; the bundled `symeraseme` reports 0.13.0. Earlier history: PARTIAL (local). The existing DMG mock gate passed and checked fail-closed credentials and nested-before-app signing invocation; no signed Rust-app DMG or mounted final manifest was produced. |
+| REL-007 | release | nested Rust binary Developer ID signature | release workflow | codesign verification | side-effect | macOS | PASS (published canary). Published canary prerelease `v0.13.0` (release run `37475999775`, source `780512f17d4dd434676d62539f81550ce048f77e`); independently downloaded and read back on 2026-10-06. Both nested backends `symeraseme` (Rust) and `symeraseme-go` satisfy their Designated Requirement under Developer ID team `M4744F3TAA`. Earlier history: TODO |
+| REL-008 | release | DMG container signature before notarization | issue #794 | codesign/notary proof | side-effect | macOS | PASS (published canary). Published canary prerelease `v0.13.0` (release run `37475999775`, source `780512f17d4dd434676d62539f81550ce048f77e`); independently downloaded and read back on 2026-10-06. The DMG container satisfies its Designated Requirement; app and DMG notarization submissions were `Accepted` (`a9773d14-9996-433f-92b6-e7327aaa983b`, `e8c84437-7e06-4163-afe1-0e4983e1c644`). Earlier history: TODO. #794 closed via #820 (Go DMG path signs the container before notarization); the Rust release candidate still needs fresh Accepted notarization, stapler and Gatekeeper evidence (external gate `signed-dmg-rc`). |
+| REL-009 | release | notarization/stapling and release-note truth | release workflow | notary/stapler checks | side-effect | macOS | PASS (published canary). Published canary prerelease `v0.13.0` (release run `37475999775`, source `780512f17d4dd434676d62539f81550ce048f77e`); independently downloaded and read back on 2026-10-06. `stapler validate` passes for app and DMG; `spctl` accepts both as `Notarized Developer ID`; release notes state the canary status, Rust default, Go rollback, SBOMs, attestations and the signed/notarized/stapled DMG, matching the verified assets. Earlier history: TODO |
+| REL-010 | release | SBOM, audit, deny, provenance | new Rust workflow | artifact/security checks | side-effect | all | PASS (published canary). Published canary prerelease `v0.13.0` (release run `37475999775`, source `780512f17d4dd434676d62539f81550ce048f77e`); independently downloaded and read back on 2026-10-06. Each archive has a CycloneDX 1.6 SBOM from the dependency graphs embedded in both binaries (darwin arm64: 256 components); `gh attestation verify` passes for all six archives and the DMG. Earlier history: PARTIAL (local). On `49eb79a8`, offline `cargo audit --no-fetch` passed both lockfiles and `cargo deny --frozen check all` passed. Syft earlier emitted a CycloneDX 1.7 source inventory with 1,307 components at `7151138`. The #1128 shadow workflow candidate adds embedded cargo-auditable inventories, exact native Go build info, CycloneDX archive/binary hashes and independent packed-member reproduction. Six local identity/mutation controls and a real Linux ELF extractor smoke pass; native product SBOMs, signed published readback and provenance remain pending. |
+| CUT-001 | cutover | retired backend selector cannot dispatch a Go sibling | Rust-only archive | `backend_fallback_process.rs` and archive verifier | side-effect | six native targets | PARTIAL (Rust-only candidate, local macOS arm64 pass). `retired_backend_override_never_dispatches_a_go_sibling` compares status/stdout/stderr against direct Rust for version JSON, MCP help, project config, unknown-command errors and stdio initialization, with legacy selector values and absent/present invalid Go siblings. The named case passes locally; both Go-absent wrappers no longer fetch a rollback runtime. Final six-native execution and published Rust-only archive readback remain required. Historical dual-backend run `37449404238` at `d393bff01a658521dbceadcd3b96636d8459a387`, plus main prerelease proof `37445276934`, verified the original explicit fallback but do not certify the retired-selector contract. |
+| CUT-002 | cutover | Rust upgrade reads existing plain/encrypted data | copied Go user fixtures | upgrade suite | side-effect | all | PASS (six native release-candidate targets). Run `37449404238` at `d393bff01a658521dbceadcd3b96636d8459a387` extracted each target's checksum-verified release-candidate archive and ran the plain and encrypted runners in native confinement (macOS sandbox-exec, Linux namespaces+Landlock, Windows capability-free AppContainer with compiled denial controls): Rust read the existing Go-migrated plain store (schema 1→2) and the existing Go V3 encrypted store, including an encrypted MCP read, on all six targets (72 passing cases). Earlier history: `rust-tests/parity/plain_store_switchback.py` and `encrypted_store_switchback.py` each ran six sandboxed Go→Rust→Go steps again on integrated `49eb79a8` macOS arm64 with a Go 1.26.6 binary and the current Rust release binary. Rust read the existing plain schema-v1 fixture after Go migrated it to v2, and read the existing Go V3 encrypted fixture; the encrypted runner also read through Rust MCP stdio. Both retained raw process evidence and passed. The same runners passed again 6/6 each with a Go 1.26.6 CLI built from integrated `92a573ba` and the macOS arm64 Rust release binary whose production Rust sources are unchanged since `49eb79a8`; reports: `/tmp/eraseme-{plain,encrypted}-switchback-92a573ba/report.json`. Native Linux aarch64 plain and encrypted switchbacks then passed 6/6 each with Go 1.26.6 and Rust 1.98.0 binaries built from clean `d333ed84`; `build-manifest.json`, `plain-report-final.json` and `encrypted-report-final.json` are under `/tmp/symeraseme-native-gate-host/switchback-linux-d333-logs/`. The Linux boundary passed seven focused controls and eight runtime denial probes; both write markers were unchanged and removed. The one-line optional-probe fix at integrated `cb21489` left Linux behavior unchanged, and focused Linux controls passed again. Integrated macOS switchbacks passed 6/6 each with the final runner in `/tmp/eraseme-{plain,encrypted}-switchback-b6a43136-r2/`. Native Windows execution and real user-data restore remain open; no production cutover occurred. |
+| CUT-003 | cutover | rollback Go reads post-Rust data | Rust-created copies | rollback suite | side-effect | all | PASS (six native release-candidate targets). In the same run `37449404238`, after the Rust write the packaged Go fallback read the post-Rust state on all six targets: complete plain SQLite schema/rows/integrity matched (schema sequence 1,2,2,2) and Go read all four encrypted requests with the V3 envelope intact. Earlier history: In the same two bounded switchback runners, Rust CLI added one campaign request to each disposable store, Rust read it back, then the Go 1.26.6 CLI read the post-Rust state. The plain runner compared complete SQLite schema/rows and integrity; the encrypted runner confirmed the V3 envelope stayed encrypted and Go read all four requests. Both six-step switchbacks passed again against the integrated `92a573ba` Go CLI and production-equivalent Rust release binary; reports: `/tmp/eraseme-{plain,encrypted}-switchback-92a573ba/report.json`. Native Linux aarch64 rollback also passed in both disposable 6/6 switchbacks: Go read Rust-written plain and V3 encrypted data (`/tmp/symeraseme-native-gate-host/switchback-linux-d333-logs/{plain,encrypted}-report-final.json`). The final runner passed both 6/6 macOS switchbacks at integrated `cb21489`; Linux focused controls passed after its one-line macOS probe fix. Native Windows execution and production rollback remain open. |
 | CUT-004 | cutover | prerelease canary and stable observation period | GitHub release evidence | release checklist | side-effect | all | TODO |
 | CUT-005 | retirement | Go removed only after separate approval | git/release history | retirement PR gate | side-effect | all | TODO |
+
+## Integrated target verification (2026-09-23)
+
+The current production-code candidate is `92a573ba`; later commits through
+`cb21489` change fixture metadata, documentation and disposable parity runners,
+not Go/Rust product sources. These commands exercise the whole integrated
+workspace; row-specific fixtures and side effects remain identified above.
+The final switchback runners have separate macOS and Linux evidence above.
+
+| Target | Executable evidence | Result |
+|---|---|---|
+| macOS arm64 | `cargo nextest run --workspace --all-targets --all-features --locked --offline --no-fail-fast`; `/tmp/eraseme-nextest-f7f6f72c.log` | 496/496, two helpers skipped; 92a573ba later changed only source-revision metadata, whose focused scheduler/campaign replay passed 2/2 in `/tmp/eraseme-mcp-source-revision-92a573ba.log` |
+| macOS x86_64 under Rosetta | Same workspace command with `--target x86_64-apple-darwin -j 1`; `/tmp/eraseme-nextest-macos-x86-f7f6f72c.log` | 496/496, two helpers skipped; the same focused metadata replay passed on the integrated arm64 host |
+| Native Linux aarch64 | Full `cargo test --workspace --all-targets --all-features --locked --offline --no-fail-fast`; `/tmp/symeraseme-native-gate/logs/cargo-test-workspace-92a573ba-nofailfast.log` | 497 passed, zero failed, two ignored across 55 suites on exact 92a573ba |
+| Windows x86_64 GNU cross target | Strict all-target/all-feature Clippy; `/tmp/eraseme-windows-clippy-92a573ba.log` | Passed compile/lint; no native Windows runtime proof |
+
+On exact 92a573ba, native Linux strict Clippy, Go/Rust formatting, Go test/vet
+and `make coverage` passed; production Go coverage was 78.16% (6,934/8,871).
+Mac Go test/vet, strict Clippy, 78.22% Go coverage, and the 41-test Swift app
+suite also passed. Native Windows, Linux amd64, and Intel macOS runners for
+this unpublished checkout are still missing; Rosetta is an executable x86_64
+check, not native Intel hardware. No release/cutover evidence is claimed.
 
 ## Required normalizers
 
@@ -152,3 +1026,37 @@ A contract mismatch is a port defect until classified. If Go behavior is a bug
 that should not survive, first create a separate contract-change issue, update
 the Go behavior and fixtures, and only then port the changed contract. Never
 hide a mismatch by broad JSON sorting, whitespace trimming or stderr removal.
+
+## Ledger reconciliation 2026-09-20
+
+Row status was re-checked against executable evidence at `c1bce67a`. No status
+was raised without a named, merged test:
+
+- `CLI-011` was already integrated by #954 (`387a81d1`) and is pinned by the
+  Go-measured `rust-tests/parity/cases/cli/behavior.json`; the row still said
+  `TODO` and is now `PASS`.
+- `CRY-006`, `CRY-007` and `CRY-008` were implemented and pinned by
+  `47bb0309`/`d19ba0bb` and the WAL/durability paths; the rows said `TODO`.
+  Closing the gap honestly required one addition: the decrypted temp
+  *directory* mode (`0700`) had no positive assertion, so
+  `storage_encrypted_lifecycle.rs::encrypted_open_uses_canonical_path_and_private_sqlite_temp`
+  now pre-creates the temp root at `0755` and asserts that `open_encrypted`
+  tightens it to `0700`. Negative control: `ensure_private_dir` mutated to
+  `0770` → assertion red (`504 != 448`), restored → green.
+- `DOM-004` also said `TODO`; its pure mapping is pinned by `triage_contract.rs`
+  (Go-oracle `dom004a.json` with per-source digests) and `triage_prompts.rs`.
+  It is now `PARTIAL`: the shared broker-reply corpus is pinned too, by the
+  `triage-corpus` oracle and `triage_corpus.rs`, but the LLM-backed service
+  paths remain genuinely open — they wait on a Rust llmkit in corekit.
+  `tests/fixtures/broker_replies/` used to be Python-era residue that no test
+  read; it is now the oracle's input, with each file's digest asserted.
+- Rows whose evidence could not be named were left untouched rather than
+  upgraded on plausibility.
+
+Frozen HTTP readback (2026-10-04, #1131): all4 real Unix wire captures from
+run37209575551/sourcea1a1af0 are imported without rewriting bytes, after
+independent archive/native/source/generator validation. The unchanged complete
+Go-absent selection passes380 tests; 3 EINTR controls and strict workspace
+Clippy pass. The original ten wire cases and negative corrupt-record controls
+are retained. All-six current-head native acceptance and remaining live-Go
+HTTP parents are still required; no cutover row is promoted.

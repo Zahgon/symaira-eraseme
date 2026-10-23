@@ -1,0 +1,4312 @@
+//! MCP tool dispatch.
+//!
+//! Mirrors Go's `ContractHandler`: the MCP layer itself knows nothing about the
+//! tools; a handler maps a *validated* `tools/call` to a result, and a handler
+//! failure becomes a sanitized `-32603` response.
+//!
+//! All 26 catalogue tools dispatch to Rust handlers. Some adapter paths remain
+//! partial; an unknown name (including the legacy `status` alias) reproduces
+//! Go's switch default.
+
+#[cfg(test)]
+#[path = "../../tests/support/frozen_mcp_runtime.rs"]
+mod frozen_mcp_runtime;
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use chrono::{DateTime, SecondsFormat, Utc};
+use serde_json::{Map, Value, json};
+use symeraseme_core::campaign;
+use symeraseme_core::config::ConfigContext;
+use symeraseme_core::confirmation;
+use symeraseme_core::email::config::{ImapConfigOptions, load_imap_config_with_options};
+use symeraseme_core::email::hwm::HwmStore;
+use symeraseme_core::email::service::InboxService;
+use symeraseme_core::email::session::ImapDialer;
+use symeraseme_core::email::types::{MatchedMessage, RemovalRequest};
+use symeraseme_core::identity::{
+    ConsentError, ConsentOptions, ConsentStore, DEFAULT_TOKEN_TTL, GrantOptions, GrantOutcome,
+    MasterKeyResolver, OsSecretBackend, ProfileError, ProfilePaths, SecretResolver,
+    default_consent_directory, load_profile,
+};
+use symeraseme_core::jsonorder::go_map_order;
+use symeraseme_core::llm::{self, AgentClient, CreateOptions};
+use symeraseme_core::manualtasks::{self, ListOpts};
+use symeraseme_core::redaction::{read_workspace_file, redact_bytes};
+use symeraseme_core::registry::{self, load_embedded, load_from_dir};
+use symeraseme_core::reporting;
+use symeraseme_core::storage::repository::{ListRemovalRequestsOptions, Repository};
+use symeraseme_core::storage::types::{EventType, Source};
+use symeraseme_core::storage::{EventRecord, RemovalRequestRow, Store};
+use symeraseme_core::timeutil;
+use symeraseme_core::triage_service::{self, ClassifyRequest, LlmResponse, RebuttalRequest};
+use symeraseme_engine::scheduler;
+
+use super::tools_call::catalogue_has_tool;
+
+/// Go's `ContractHandler` switch default.
+const DEFAULT_ERROR: &str = "tool not found";
+
+/// A handler failure. The message reaches the client through
+/// [`super::envelope::sanitize_error`], exactly like a Go handler error.
+#[derive(PartialEq, Eq)]
+pub struct ToolError {
+    message: String,
+    raw_message: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for ToolError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("ToolError")
+            .field(&self.message)
+            .finish()
+    }
+}
+
+#[allow(non_snake_case)]
+pub fn ToolError(message: String) -> ToolError {
+    ToolError {
+        message,
+        raw_message: None,
+    }
+}
+
+impl ToolError {
+    fn with_raw_message(message: String, raw_message: Vec<u8>) -> Self {
+        Self {
+            message,
+            raw_message: Some(raw_message),
+        }
+    }
+
+    pub(crate) fn raw_message_bytes(&self) -> Option<&[u8]> {
+        self.raw_message.as_deref()
+    }
+}
+
+impl std::fmt::Display for ToolError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+/// Maps a validated tool name and its arguments to a result.
+pub trait ToolHandler: Send + Sync {
+    fn call(&self, name: &str, arguments: &Map<String, Value>) -> Result<Value, ToolError>;
+
+    fn call_cancellable(
+        &self,
+        name: &str,
+        arguments: &Map<String, Value>,
+        _cancellation: &llm::CancellationToken,
+    ) -> Result<Value, ToolError> {
+        self.call(name, arguments)
+    }
+}
+
+/// `json.Marshal` of one Go string: quoted, with the HTML characters Go escapes
+/// by default (`<`, `>`, `&`, U+2028, U+2029) turned into `\uXXXX`.
+fn go_json_string(value: &str) -> String {
+    let serialized = serde_json::to_string(value).expect("a string is serializable");
+    String::from_utf8(super::envelope::go_escape_json_strings(
+        serialized.as_bytes(),
+    ))
+    .expect("escaped JSON is UTF-8")
+}
+
+fn go_struct_text(value: &impl serde::Serialize) -> Result<Value, ToolError> {
+    let bytes = serde_json::to_vec(value).map_err(|error| ToolError(error.to_string()))?;
+    Ok(Value::String(
+        String::from_utf8(super::envelope::go_escape_json_strings(&bytes))
+            .expect("escaped JSON remains UTF-8"),
+    ))
+}
+
+fn triage_agent_call<'a>(
+    agent: &'a AgentClient,
+    cancellation: Option<&'a llm::CancellationToken>,
+    raw_error: &'a std::sync::Mutex<Option<Vec<u8>>>,
+) -> impl Fn(&str, &str, &str) -> Result<LlmResponse, String> + 'a {
+    move |system, user, cache_key| {
+        let options = llm::ClassifyOptions {
+            cache_key: cache_key.to_owned(),
+            ..llm::ClassifyOptions::default()
+        };
+        let result = match cancellation {
+            Some(cancellation) => agent.classify_cancellable(system, user, &options, cancellation),
+            None => agent.classify(system, user, &options),
+        };
+        let (text, usage) = match result {
+            Ok(result) => {
+                *raw_error.lock().expect("triage error mutex") = None;
+                result
+            }
+            Err(error) => {
+                *raw_error.lock().expect("triage error mutex") =
+                    error.raw_message_bytes().map(<[u8]>::to_vec);
+                return Err(error.to_string());
+            }
+        };
+        Ok(LlmResponse { text, usage })
+    }
+}
+
+/// One `email.MatchedMessage` as Go marshals it: the embedded `Message` keeps
+/// its declaration order and its capitalised field names, then `RequestID`
+/// (nullable) and `MatchMethod`. A nil `Flags` slice stays `null` — Go does not
+/// turn it into `[]`, and neither does this.
+fn go_matched_message_json(matched: &MatchedMessage) -> String {
+    let message = &matched.message;
+    let date = match &message.date {
+        Some(date) => go_json_string(&date.to_rfc3339_opts(SecondsFormat::AutoSi, true)),
+        None => "null".to_owned(),
+    };
+    let flags = match &message.flags {
+        Some(flags) => format!(
+            "[{}]",
+            flags
+                .iter()
+                .map(|flag| go_json_string(flag))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        None => "null".to_owned(),
+    };
+    let request_id = matched
+        .request_id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "null".to_owned());
+    format!(
+        "{{\"Message\":{{\"ID\":{},\"Subject\":{},\"From\":{},\"To\":{},\"Date\":{},\"Body\":{},\"Flags\":{},\"MessageID\":{},\"ThreadID\":{},\"IMAPUID\":{}}},\"RequestID\":{},\"MatchMethod\":{}}}",
+        go_json_string(&message.id),
+        go_json_string(&message.subject),
+        go_json_string(&message.from),
+        go_json_string(&message.to),
+        date,
+        go_json_string(&message.body),
+        flags,
+        go_json_string(&message.message_id),
+        go_json_string(&message.thread_id),
+        message.imap_uid,
+        request_id,
+        go_json_string(matched.match_method.as_str())
+    )
+}
+
+/// The production handler, mirroring Go's `ContractHandler`.
+#[derive(Clone)]
+pub struct ContractHandler {
+    /// The workspace the file-reading tools are confined to. Go uses the
+    /// process working directory; the caller supplies it here so the guard is
+    /// explicit and testable.
+    pub workspace_root: PathBuf,
+    /// Configuration for the store-backed tools. Go resolves it from the
+    /// process environment; the caller supplies it here for the same reason.
+    pub config: Option<ConfigContext>,
+    /// The instant the writing tools record. Go reads `time.Now()`; `chrono`
+    /// has no `clock` feature here, so a tool that needs it fails explicitly
+    /// when it was not supplied.
+    pub now: Option<DateTime<Utc>>,
+    /// The data directory the artifact tools use. Go resolves it from
+    /// `SYMERASEME_DATA_DIR`; `None` keeps that behaviour.
+    pub data_dir: Option<PathBuf>,
+    /// The injected IMAP dialer for `poll_inbox`. Go uses
+    /// `ContractHandlerOptions.IMAPDialer`; `None` means the production
+    /// dialer is created from the resolved config.
+    pub imap_dialer: Option<std::sync::Arc<dyn ImapDialer>>,
+    /// The injected HWM store for `poll_inbox`. Go uses
+    /// `ContractHandlerOptions.HWMStore`; `None` means an in-memory store.
+    pub hwm_store: Option<std::sync::Arc<dyn HwmStore>>,
+    #[cfg(test)]
+    llm_environment: Option<HashMap<String, String>>,
+}
+
+impl ContractHandler {
+    pub fn new(workspace_root: impl Into<PathBuf>) -> Self {
+        Self {
+            workspace_root: workspace_root.into(),
+            config: None,
+            now: None,
+            data_dir: None,
+            imap_dialer: None,
+            hwm_store: None,
+            #[cfg(test)]
+            llm_environment: None,
+        }
+    }
+
+    /// Adds the data directory the artifact tools operate on.
+    pub fn with_data_dir(mut self, data_dir: impl Into<PathBuf>) -> Self {
+        self.data_dir = Some(data_dir.into());
+        self
+    }
+
+    /// Adds the configuration the store-backed tools resolve their database
+    /// from, plus the instant they record.
+    pub fn with_store(mut self, config: ConfigContext, now: DateTime<Utc>) -> Self {
+        self.config = Some(config);
+        self.now = Some(now);
+        self
+    }
+
+    /// Adds the IMAP dialer for the `poll_inbox` tool.
+    pub fn with_imap_dialer(mut self, dialer: std::sync::Arc<dyn ImapDialer>) -> Self {
+        self.imap_dialer = Some(dialer);
+        self
+    }
+
+    /// Adds the HWM store for the `poll_inbox` tool.
+    pub fn with_hwm_store(mut self, store: std::sync::Arc<dyn HwmStore>) -> Self {
+        self.hwm_store = Some(store);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_test_llm_environment(mut self, environment: HashMap<String, String>) -> Self {
+        self.llm_environment = Some(environment);
+        self
+    }
+
+    /// Opens the store the way Go's `dataStore()` does.
+    fn open_store(&self) -> Result<Store, ToolError> {
+        let config = self
+            .config
+            .as_ref()
+            .ok_or_else(|| ToolError("the store-backed tools need a configuration".to_owned()))?;
+        crate::store::open(config).map_err(ToolError)
+    }
+
+    fn with_open_store(
+        &self,
+        operation: impl FnOnce(&Store) -> Result<Value, ToolError>,
+    ) -> Result<Value, ToolError> {
+        let store = self.open_store()?;
+        let (result, close) = crate::store::with_store(store, operation);
+        Self::close_result(result, close)
+    }
+
+    fn close_result(
+        result: Result<Value, ToolError>,
+        close: Result<(), symeraseme_core::storage::EncryptedStoreError>,
+    ) -> Result<Value, ToolError> {
+        match (result, close) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(_), Err(close)) => Err(ToolError(format!("eventstore: close: {close}"))),
+            (Err(error), Err(close)) => {
+                let suffix = format!("; eventstore: close: {close}");
+                let message = format!("{}{suffix}", error.message);
+                match error.raw_message {
+                    Some(mut raw) => {
+                        raw.extend_from_slice(suffix.as_bytes());
+                        Err(ToolError::with_raw_message(message, raw))
+                    }
+                    None => Err(ToolError(message)),
+                }
+            }
+        }
+    }
+
+    fn recorded_instant(&self) -> Result<DateTime<Utc>, ToolError> {
+        self.now.ok_or_else(|| {
+            ToolError("this tool needs an injected instant and none was supplied".to_owned())
+        })
+    }
+
+    /// Go's `Result` marshalling: `success`, `error` and the flattened data keys
+    /// go through a Go map, so they are emitted in sorted key order — a
+    /// `message` is dropped when an error is present. The crate builds JSON
+    /// objects in insertion order (`serde_json/preserve_order`, needed for the
+    /// struct-ordered payloads nested inside), so this one sorts explicitly.
+    fn result_payload(success: bool, error: Option<String>, data: Vec<(&str, Value)>) -> Value {
+        let mut entries: Vec<(String, Value)> = vec![("success".to_owned(), json!(success))];
+        if let Some(error) = &error {
+            entries.push(("error".to_owned(), json!(error)));
+        }
+        for (key, value) in data {
+            if error.is_some() && key == "message" {
+                continue;
+            }
+            entries.push((key.to_owned(), value));
+        }
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        Value::Object(entries.into_iter().collect::<Map<String, Value>>())
+    }
+
+    /// Go's `HandleList`.
+    fn manual_tasks_list(&self, arguments: &Map<String, Value>) -> Result<Value, ToolError> {
+        self.with_open_store(|store| {
+            let status = get_str(arguments, "status", "");
+            let request_id = get_int(arguments, "request_id", 0);
+            manualtasks::handle_list(
+                store,
+                &ListOpts {
+                    status: (!status.is_empty()).then_some(status),
+                    request_id: (request_id != 0).then_some(request_id),
+                },
+            )
+            .map(|result| result.into_value())
+            .map_err(|error| ToolError(error.to_string()))
+        })
+    }
+
+    /// Go's `HandleShow`.
+    fn manual_tasks_show(&self, arguments: &Map<String, Value>) -> Result<Value, ToolError> {
+        self.with_open_store(|store| {
+            let task_id = get_int(arguments, "task_id", 0);
+            manualtasks::handle_show(store, task_id)
+                .map(|result| result.into_value())
+                .map_err(|error| ToolError(error.to_string()))
+        })
+    }
+
+    /// Go's `HandleComplete`.
+    fn manual_tasks_complete(&self, arguments: &Map<String, Value>) -> Result<Value, ToolError> {
+        self.with_open_store(|store| {
+            let now = self.recorded_instant()?;
+            let task_id = get_int(arguments, "task_id", 0);
+            let notes = get_str(arguments, "notes", "");
+            manualtasks::handle_complete(store, task_id, &notes, now)
+                .map(|result| result.into_value())
+                .map_err(|error| ToolError(error.to_string()))
+        })
+    }
+
+    /// Go's `HandleCleanup`.
+    fn manual_tasks_cleanup(&self, arguments: &Map<String, Value>) -> Result<Value, ToolError> {
+        let dry_run = get_bool(arguments, "dry_run", false);
+        let directory = manualtasks::tasks_dir_in(self.data_dir.as_deref())
+            .map_err(|error| ToolError(error.to_string()))?;
+        manualtasks::handle_cleanup(&directory, dry_run)
+            .map(|result| result.into_value())
+            .map_err(|error| ToolError(error.to_string()))
+    }
+
+    /// Go's `grant`. The dry-run branch echoes its arguments and touches no
+    /// store; the token branches need the consent store and are not part of
+    /// this slice, so they report that instead of pretending otherwise.
+    fn grant(&self, arguments: &Map<String, Value>) -> Result<Value, ToolError> {
+        let options = GrantOptions {
+            command: get_str(arguments, "command", "execute"),
+            ttl: get_int(arguments, "ttl", DEFAULT_TOKEN_TTL),
+            dry_run: get_bool(arguments, "dry_run", false),
+            list_tokens: get_bool(arguments, "list_tokens", false),
+            revoke: Some(get_str(arguments, "revoke", "")),
+            revoke_all: get_bool(arguments, "revoke_all", false),
+        };
+        // Go resolves the consent directory inside the token paths only, so a
+        // dry run answers without one.
+        let consent_directory = if options.dry_run {
+            PathBuf::new()
+        } else {
+            default_consent_directory().map_err(|error| ToolError(error.to_string()))?
+        };
+        let store = ConsentStore::new(consent_directory);
+        let outcome = store.grant(&options).map_err(|error| match error {
+            // The only `grant` branch that reports a missing token is the
+            // single-token revoke, and Go words it without the package prefix.
+            ConsentError::NotFound => ToolError("consent token not found".to_owned()),
+            error => ToolError(error.to_string()),
+        })?;
+        // Go marshals `[]ConsentToken` itself, so the list keeps the struct's
+        // field order; it is rendered here and carried as text, like
+        // [`event_list`]. An empty store is Go's nil slice.
+        if let GrantOutcome::List { count, tokens, .. } = &outcome {
+            let rendered = if tokens.is_empty() {
+                "null".to_owned()
+            } else {
+                serde_json::to_string(tokens).map_err(|error| ToolError(error.to_string()))?
+            };
+            let body = format!("{{\"count\":{count},\"success\":true,\"tokens\":{rendered}}}");
+            return Ok(Value::String(
+                String::from_utf8(super::envelope::go_escape_json_strings(body.as_bytes()))
+                    .expect("escaped JSON is UTF-8"),
+            ));
+        }
+        serde_json::to_value(&outcome).map_err(|error| ToolError(error.to_string()))
+    }
+
+    /// Go's `generate_scheduler`, including writing files outside dry-run mode.
+    fn generate_scheduler(&self, arguments: &Map<String, Value>) -> Result<Value, ToolError> {
+        let cfg = scheduler::Config {
+            platform: scheduler::Platform::parse(&get_str(arguments, "platform", "")),
+            output_dir: get_str(arguments, "output_dir", "./schedules"),
+            tick_hour: get_int(arguments, "tick_hour", 10) as i32,
+            tick_minute: get_int(arguments, "tick_minute", 0) as i32,
+            poll_hours: parse_poll_hours(&get_str(arguments, "poll_hours", ""))?,
+            project_dir: get_str(arguments, "project_dir", ""),
+            binary_path: get_str(arguments, "symeraseme_bin", ""),
+            venv_activate: get_str(arguments, "venv_activate", ""),
+        };
+        let files = scheduler::generate(&cfg).map_err(|error| ToolError(error.to_string()))?;
+        if get_bool(arguments, "dry_run", false) {
+            return Ok(json!({
+                "success": true,
+                "files": files,
+                "dry_run": true,
+            }));
+        }
+        let written = scheduler::write_files(&cfg.output_dir, &files)
+            .map_err(|error| ToolError(error.to_string()))?;
+        Ok(json!({
+            "success": true,
+            "files": written.iter().map(|path| path.to_string_lossy()).collect::<Vec<_>>(),
+            "dry_run": false,
+        }))
+    }
+
+    /// Go's `generate_dashboard`: dashboard data, rendered template, and the
+    /// file write when `output` is set — which the CLI default (`report.html`)
+    /// always is. Paths resolve against the process working directory, like
+    /// Go's `filepath.Abs`.
+    fn generate_dashboard(&self, arguments: &Map<String, Value>) -> Result<Value, ToolError> {
+        self.with_open_store(|store| {
+            let now = self.recorded_instant()?;
+            let data = reporting::get_dashboard_data(store, "", now)
+                .map_err(|error| ToolError(error.to_string()))?;
+            let content =
+                reporting::generate_dashboard(&data, get_int(arguments, "auto_refresh", 0), now)
+                    .map_err(ToolError)?;
+            if get_str(arguments, "output", "").is_empty() {
+                return Ok(json!({
+                    "success": true,
+                    "dashboard": content,
+                    "campaigns": data["total_campaigns"],
+                    "requests": data["total_requests"],
+                }));
+            }
+            let path = write_generated_file(&get_str(arguments, "output", ""), content.as_bytes())?;
+            Ok(json!({
+                "success": true,
+                "output_file": path,
+                "size_bytes": content.len() as i64,
+                "campaigns": data["total_campaigns"],
+                "requests": data["total_requests"],
+            }))
+        })
+    }
+
+    /// Go's `generate_report`: report data in the requested format, and the
+    /// file write when `output` is set.
+    fn generate_report(&self, arguments: &Map<String, Value>) -> Result<Value, ToolError> {
+        self.with_open_store(|store| {
+            let now = self.recorded_instant()?;
+            let format = get_str(arguments, "format", "html");
+            let data = reporting::get_report_data(
+                store,
+                &reporting::ReportOpts {
+                    campaign_id: get_str(arguments, "campaign_id", ""),
+                    all_campaigns: get_bool(arguments, "all_campaigns", false),
+                },
+                now,
+            )
+            .map_err(|error| ToolError(error.to_string()))?;
+            let content = reporting::generate_report(&data, &format, now).map_err(ToolError)?;
+            if get_str(arguments, "output", "").is_empty() {
+                return Ok(json!({
+                    "success": true,
+                    "report": content,
+                    "format": format,
+                }));
+            }
+            let path = write_generated_file(&get_str(arguments, "output", ""), content.as_bytes())?;
+            Ok(json!({
+                "success": true,
+                "output_file": path,
+                "size_bytes": content.len() as i64,
+                "format": format,
+            }))
+        })
+    }
+
+    /// Go's `plan_create`: resolve and load the requested identity profile,
+    /// then plan against the embedded registry.
+    fn plan_create(&self, arguments: &Map<String, Value>) -> Result<Value, ToolError> {
+        self.with_open_store(|store| {
+            let now = self.recorded_instant()?;
+            let profile_path = get_str(arguments, "profile_path", "");
+            let paths = ProfilePaths::from_process();
+            let mut keys = MasterKeyResolver::from_process();
+            let profile = match load_profile(Path::new(&profile_path), &paths, &mut keys) {
+                Ok(profile) => Some(profile),
+                Err(ProfileError::NotFound) => None,
+                Err(error) => return Err(ToolError(error.to_string())),
+            };
+            let identity_hash = profile
+                .as_ref()
+                .map(symeraseme_core::identity::hash_profile)
+                .unwrap_or_default();
+            let brokers = load_embedded().map_err(|error| ToolError(error.to_string()))?;
+            let result = campaign::plan_campaign(
+                store,
+                &brokers,
+                &identity_hash,
+                &campaign::PlanOpts {
+                    campaign_id: get_str(arguments, "campaign_id", ""),
+                    jurisdiction: get_str(arguments, "jurisdiction", ""),
+                    law: get_str(arguments, "law", ""),
+                    priority: get_str(arguments, "priority", ""),
+                    category: get_str(arguments, "category", ""),
+                    status: get_str(arguments, "status", "active"),
+                    include_inactive: get_bool(arguments, "include_inactive", false),
+                    include_disabled: get_bool(arguments, "include_disabled", false),
+                    max_brokers: get_int(arguments, "max_brokers", 30),
+                    notes: get_str(arguments, "notes", ""),
+                },
+                now,
+            )
+            .map_err(|error| ToolError(error.to_string()))?;
+            // Go marshals the PlanResult struct into the content text before the
+            // outer MCP envelope. Keep declaration order and Go's HTML escaping.
+            let bytes =
+                serde_json::to_vec(&result).map_err(|error| ToolError(error.to_string()))?;
+            Ok(Value::String(
+                String::from_utf8(super::envelope::go_escape_json_strings(&bytes))
+                    .expect("escaped JSON remains UTF-8"),
+            ))
+        })
+    }
+
+    /// Go's non-interactive `execute`: require explicit consent for live
+    /// execution, then dispatch through the core executor with no email sender
+    /// or browser executor configured. Web forms can create manual tasks; no
+    /// request can reach a network adapter.
+    fn execute_campaign(&self, arguments: &Map<String, Value>) -> Result<Value, ToolError> {
+        self.with_open_store(|store| {
+            let dry_run = get_bool(arguments, "dry_run", false);
+            if !dry_run {
+                let consent_directory =
+                    default_consent_directory().map_err(|error| ToolError(error.to_string()))?;
+                let consent = ConsentStore::new(consent_directory);
+                consent
+                    .authorize(
+                        "execute",
+                        &ConsentOptions {
+                            consent_token: Some(get_str(arguments, "consent_token", "")),
+                            consent_file: Some(get_str(arguments, "consent_file", "")),
+                            consent_env_var: Some("SYMERASEME_CONSENT".to_owned()),
+                            consent_file_env_var: Some("SYMERASEME_CONSENT_FILE".to_owned()),
+                            interactive: false,
+                            ..ConsentOptions::default()
+                        },
+                    )
+                    .map_err(|error| ToolError(error.to_string()))?;
+            }
+            let brokers = load_embedded().map_err(|error| ToolError(error.to_string()))?;
+            let paths = ProfilePaths::from_process();
+            let mut keys = MasterKeyResolver::from_process();
+            let profile_result = match load_profile(Path::new(""), &paths, &mut keys) {
+                Ok(profile) => Ok(Some(profile)),
+                Err(ProfileError::NotFound) => Ok(None),
+                Err(error) => Err(error.to_string()),
+            };
+            let profile = profile_result
+                .as_ref()
+                .map(|profile| profile.as_ref())
+                .map_err(String::as_str);
+            let result = campaign::execute_campaign(
+                store,
+                &get_str(arguments, "campaign_id", ""),
+                &campaign::ExecuteOpts {
+                    account: get_str(arguments, "account", ""),
+                    dry_run,
+                    email_sender: None,
+                    brokers: &brokers,
+                },
+                profile,
+                get_int(arguments, "batch_size", 5),
+                self.recorded_instant()?,
+            )
+            .map_err(|error| ToolError(error.to_string()))?;
+            Ok(Value::Object(result))
+        })
+    }
+
+    fn triage_agent(&self, arguments: &Map<String, Value>) -> Result<AgentClient, ToolError> {
+        llm::create(
+            &CreateOptions {
+                provider: get_str(arguments, "provider", ""),
+                model: get_str(arguments, "model", ""),
+                ..CreateOptions::default()
+            },
+            &|name| {
+                #[cfg(test)]
+                if let Some(environment) = &self.llm_environment {
+                    return environment.get(name).cloned();
+                }
+                std::env::var(name).ok()
+            },
+        )
+        .map_err(|error| ToolError(error.to_string()))
+    }
+
+    fn classify_reply(
+        &self,
+        arguments: &Map<String, Value>,
+        cancellation: Option<&llm::CancellationToken>,
+    ) -> Result<Value, ToolError> {
+        self.with_open_store(|store| {
+            let agent = self.triage_agent(arguments)?;
+            let raw_error = std::sync::Mutex::new(None);
+            let call = triage_agent_call(&agent, cancellation, &raw_error);
+            let outcome = triage_service::Service::new(store)
+                .classify_reply(
+                    get_int(arguments, "request_id", 0),
+                    &ClassifyRequest::default(),
+                    None,
+                    Some(&call),
+                    get_bool(arguments, "save", true),
+                )
+                .map_err(ToolError)?;
+            if let Some(error) = outcome.error {
+                return Err(match raw_error.lock().expect("triage error mutex").take() {
+                    Some(raw) => ToolError::with_raw_message(error, raw),
+                    None => ToolError(error),
+                });
+            }
+            go_struct_text(&outcome.result)
+        })
+    }
+
+    fn generate_rebuttal(
+        &self,
+        arguments: &Map<String, Value>,
+        cancellation: Option<&llm::CancellationToken>,
+    ) -> Result<Value, ToolError> {
+        self.with_open_store(|store| {
+        let agent = self.triage_agent(arguments)?;
+        let raw_error = std::sync::Mutex::new(None);
+        let call = triage_agent_call(&agent, cancellation, &raw_error);
+        let result = triage_service::Service::new(store)
+            .generate_rebuttal(
+                get_int(arguments, "request_id", 0),
+                &RebuttalRequest::default(),
+                None,
+                Some(&call),
+                get_bool(arguments, "save", true),
+            )
+            .map_err(|error| match raw_error.lock().expect("triage error mutex").take() {
+                Some(raw) => ToolError::with_raw_message(error, raw),
+                None => ToolError(error),
+            })?;
+        go_struct_text(&json!({
+            "TemplateName": result.template_name,
+            "Label": result.label,
+            "Description": result.description,
+            "Jurisdiction": result.jurisdiction,
+            "RejectionClassification": result.rejection_classification,
+            "Confidence": result.confidence,
+            "RebuttalBody": result.rebuttal_body,
+            "NeedsHumanReview": result.needs_human_review,
+            "LLMUsed": result.llm_used,
+            "Usage": {
+                "Model": result.usage.model,
+                "InputTokens": result.usage.input_tokens,
+                "OutputTokens": result.usage.output_tokens,
+                "CacheCreationTokens": result.usage.cache_creation_tokens,
+                "CacheReadTokens": result.usage.cache_read_tokens,
+                "Cost": if result.usage.cost == 0.0 { json!(0) } else { json!(result.usage.cost) },
+            },
+        }))
+        })
+    }
+
+    /// Go's `list_brokers`: the embedded registry through the shared filter.
+    ///
+    /// The envelope and filter keys follow Go map order; nested brokers and
+    /// channels retain the declaration order of Go registry structs.
+    fn list_brokers(&self, arguments: &Map<String, Value>) -> Result<Value, ToolError> {
+        let brokers = load_embedded().map_err(|error| ToolError(error.to_string()))?;
+        let status = optional_str(arguments, "status").or_else(|| Some("active".to_owned()));
+        let filter = registry::BrokerFilter {
+            jurisdiction: optional_str(arguments, "jurisdiction"),
+            law: optional_str(arguments, "law"),
+            priority: optional_str(arguments, "priority"),
+            category: optional_str(arguments, "category"),
+            include_disabled: get_bool(arguments, "include_disabled", false),
+            status: status.clone(),
+            include_inactive: get_bool(arguments, "include_inactive", false),
+        };
+        let filtered = registry::filter_brokers(&brokers, &filter);
+        let mut broker_values =
+            serde_json::to_value(&filtered).map_err(|error| ToolError(error.to_string()))?;
+        // Registry form-spec floats use Go's integral-number spelling. Keep
+        // struct field order while converting only those numeric wire fields.
+        for broker in broker_values.as_array_mut().expect("broker array") {
+            for channel in broker["opt_out"].as_array_mut().expect("channel array") {
+                if let Some(spec) = channel.get_mut("form_spec") {
+                    for key in ["timeout_seconds", "rate_limit_delay"] {
+                        if let Some(number) = spec.get_mut(key) {
+                            let value = number.as_f64().expect("validated form-spec number");
+                            if value.fract() == 0.0
+                                && value >= i64::MIN as f64
+                                && value < i64::MAX as f64
+                            {
+                                *number = json!(value as i64);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(json!({
+            "brokers": broker_values,
+            "count": filtered.len(),
+            "filters": {
+                "include_disabled": filter.include_disabled,
+                "status": status,
+            },
+            "schema_version": 1,
+        }))
+    }
+
+    /// Go's `schedule_install`, using the same scheduler engine as the CLI.
+    fn schedule_install(&self, arguments: &Map<String, Value>) -> Result<Value, ToolError> {
+        let config = scheduler::Config {
+            platform: scheduler::Platform::parse(&get_str(arguments, "platform", "")),
+            tick_hour: get_int(arguments, "tick_hour", 10) as i32,
+            tick_minute: get_int(arguments, "tick_minute", 0) as i32,
+            ..scheduler::Config::default()
+        };
+        if get_bool(arguments, "dry_run", false) {
+            let files =
+                scheduler::generate(&config).map_err(|error| ToolError(error.to_string()))?;
+            return Ok(json!({"success": true, "files": files, "dry_run": true}));
+        }
+        let mut options = scheduler::install::InstallOptions::new(config);
+        options.platform_name = Some(get_str(arguments, "platform", ""));
+        options.replace_legacy = get_bool(arguments, "replace_legacy", false);
+        let result =
+            scheduler::install::install(&options).map_err(|error| ToolError(error.to_string()))?;
+        let legacy = result
+            .legacy
+            .into_iter()
+            .map(|unit| {
+                json!({
+                    "Platform": unit.platform.map(|platform| platform.to_string()).unwrap_or_default(),
+                    "Kind": unit.kind,
+                    "Name": unit.name,
+                    "Path": unit.path.to_string_lossy(),
+                    "IsPython": unit.is_python,
+                    "Reason": unit.reason,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({
+            "Platform": result.platform,
+            "OutputDir": result.output_dir,
+            "Files": result.files,
+            "Legacy": if legacy.is_empty() && result.platform == scheduler::Platform::Cron {
+                Value::Null
+            } else {
+                json!(legacy)
+            },
+            "ReplacementRequired": result.replacement_required,
+        }))
+    }
+
+    fn schedule_uninstall(&self, arguments: &Map<String, Value>) -> Result<Value, ToolError> {
+        let config = scheduler::Config {
+            platform: scheduler::Platform::parse(&get_str(arguments, "platform", "")),
+            ..scheduler::Config::default()
+        };
+        let mut options = scheduler::install::InstallOptions::new(config);
+        options.platform_name = Some(get_str(arguments, "platform", ""));
+        scheduler::install::uninstall(&options).map_err(|error| ToolError(error.to_string()))?;
+        Ok(json!({"success": true}))
+    }
+
+    fn schedule_status(&self, arguments: &Map<String, Value>) -> Result<Value, ToolError> {
+        let config = scheduler::Config {
+            platform: scheduler::Platform::parse(&get_str(arguments, "platform", "")),
+            ..scheduler::Config::default()
+        };
+        let mut options = scheduler::install::InstallOptions::new(config);
+        options.platform_name = Some(get_str(arguments, "platform", ""));
+        let result =
+            scheduler::install::status(&options).map_err(|error| ToolError(error.to_string()))?;
+        serde_json::to_value(result).map_err(|error| ToolError(error.to_string()))
+    }
+
+    /// Go's `auto_confirm`: previews a trusted link on dry-run, otherwise
+    /// creates the same durable manual task used when no clicker is available.
+    fn auto_confirm(&self, arguments: &Map<String, Value>) -> Result<Value, ToolError> {
+        self.with_open_store(|store| {
+        let request_id = get_int(arguments, "request_id", 0);
+        let dry_run = get_bool(arguments, "dry_run", false);
+        let reply = confirmation::latest_reply_body(store, request_id)
+            .map_err(|error| ToolError(error.to_string()))?;
+        let Some(reply) = reply else {
+            return Ok(json!({
+                "Success": false,
+                "ClickedURL": "",
+                "ClickedHost": "",
+                "ClickedURLSHA256": "",
+                "Step": "no_reply",
+                "Error": format!("no inbox reply found for request #{request_id}"),
+                "ScreenshotBefore": "",
+                "ScreenshotAfter": "",
+                "ScreenshotBeforeSHA256": "",
+                "ScreenshotAfterSHA256": "",
+                "ScreenshotBeforeBytes": 0,
+                "ScreenshotAfterBytes": 0,
+                "DryRun": dry_run,
+                "TaskID": 0,
+                "Instructions": "",
+                "Status": "",
+                "Reason": "",
+                "ManualActionRequired": false,
+            }));
+        };
+        let links = confirmation::extract_confirmation_links(&reply);
+        let Some(link) = links.first() else {
+            let error = "No confirmation links found in reply body";
+            if !dry_run {
+                store
+                    .append_and_project(
+                        request_id,
+                        &EventType::NoteAdded,
+                        &json!({
+                            "note": format!("Auto-confirm failed: {error}"),
+                            "url_host": "",
+                            "url_sha256": "",
+                        })
+                        .as_object()
+                        .expect("note payload")
+                        .clone(),
+                        &Source::System,
+                        self.recorded_instant()?,
+                    )
+                    .map_err(|error| ToolError(error.to_string()))?;
+            }
+            return Ok(confirmation_result(
+                false,
+                "no_links",
+                error.to_owned(),
+                "",
+                false,
+                None,
+            ));
+        };
+        if dry_run {
+            return Ok(confirmation_result(
+                true,
+                "dry_run",
+                String::new(),
+                link,
+                true,
+                None,
+            ));
+        }
+
+        let request = Repository::new(store)
+            .get_removal_request(request_id)
+            .map_err(|error| ToolError(error.to_string()))?;
+        let host = link
+            .strip_prefix("https://")
+            .unwrap_or(link)
+            .split(['/', '?', '#'])
+            .next()
+            .unwrap_or_default()
+            .split(':')
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let broker_id = request
+            .as_ref()
+            .map(|request| request.broker_id.clone())
+            .filter(|broker_id| !broker_id.is_empty())
+            .unwrap_or_else(|| host.clone());
+        let now = self.recorded_instant()?;
+        let task = manualtasks::create(
+            store,
+            &manualtasks::CreateOpts {
+                request_id: Some(request_id),
+                broker_id: broker_id.clone(),
+                broker_name: broker_id,
+                form_url: link.clone(),
+                reason: "dynamic_form".to_owned(),
+                extra_instructions: "Open the confirmation URL and complete the confirmation manually; no click was attempted.".to_owned(),
+                ..manualtasks::CreateOpts::default()
+            },
+            None,
+            now,
+        )
+        .map_err(|error| ToolError(error.to_string()))?;
+        Ok(confirmation_result(
+            false,
+            "manual_confirmation_required",
+            String::new(),
+            link,
+            false,
+            Some(&task),
+        ))
+        })
+    }
+
+    /// Go's `run_web_form`: with `dry_run` the handler answers from the
+    /// registry alone; otherwise it opens the store the nil-executor adapter
+    /// falls back to a manual task through.
+    fn run_web_form(&self, arguments: &Map<String, Value>) -> Result<Value, ToolError> {
+        let dry_run = get_bool(arguments, "dry_run", false);
+        // Go's order: loadRegistry, then — only for a real run — dataStore,
+        // then the adapter (webForm lookup, profile, branch).
+        let brokers = load_embedded().map_err(|error| ToolError(error.to_string()))?;
+        let store = if dry_run {
+            None
+        } else {
+            Some(self.open_store()?)
+        };
+        let result = (|| {
+            let broker_id = get_str(arguments, "broker_id", "");
+            // Go's adapter order: webForm lookup, then profile, then branch.
+            let preview = match campaign::web_form_preview(&brokers, &broker_id, dry_run) {
+                Err(failure) => return Ok(Value::Object(failure)),
+                Ok(preview) => preview,
+            };
+            // Go's `WebFormAdapter.profile`: an absent profile is fine, a broken
+            // one fails the run with an `interaction_failed` payload.
+            let paths = ProfilePaths::from_process();
+            let mut keys = MasterKeyResolver::from_process();
+            let profile = match load_profile(Path::new(""), &paths, &mut keys) {
+                Ok(profile) => Some(profile),
+                Err(ProfileError::NotFound) => None,
+                Err(error) => {
+                    return Ok(json!({
+                        "success": false,
+                        "code": "interaction_failed",
+                        "error": error.to_string(),
+                        "reason": "generic_error",
+                        "dry_run": dry_run,
+                    }));
+                }
+            };
+            // Go's `FormSpecFromBroker` step: it can only fail on a nil spec, and
+            // the parsed registry type makes that impossible, so the dry-run
+            // preview stands in for it unchanged.
+            if dry_run {
+                return Ok(Value::Object(preview));
+            }
+            let store = store.as_ref().expect("store opened for a non-dry run");
+            let now = self.recorded_instant()?;
+            let request_id = get_int(arguments, "request_id", 0);
+            let task = manualtasks::create(
+                store,
+                &manualtasks::CreateOpts {
+                    request_id: (request_id != 0).then_some(request_id),
+                    broker_id: field_string(&preview, "broker_id"),
+                    broker_name: field_string(&preview, "broker_name"),
+                    form_url: field_string(&preview, "url"),
+                    reason: "dynamic_form".to_owned(),
+                    ..manualtasks::CreateOpts::default()
+                },
+                profile.as_ref(),
+                now,
+            );
+            // Go's `createManualTask` reports a store failure inside the result
+            // map; it is not a handler error.
+            let mut result = Map::new();
+            result.insert("success".to_owned(), json!(false));
+            result.insert("status".to_owned(), json!("manual_action_required"));
+            result.insert("reason".to_owned(), json!("dynamic_form"));
+            result.insert(
+                "broker_id".to_owned(),
+                preview.get("broker_id").cloned().unwrap_or(Value::Null),
+            );
+            result.insert(
+                "broker_name".to_owned(),
+                preview.get("broker_name").cloned().unwrap_or(Value::Null),
+            );
+            result.insert(
+                "url".to_owned(),
+                preview.get("url").cloned().unwrap_or(Value::Null),
+            );
+            result.insert("dry_run".to_owned(), json!(false));
+            match task {
+                Ok(task) => {
+                    result.insert("task_id".to_owned(), json!(task.id));
+                    result.insert("instructions".to_owned(), json!(task.instructions));
+                }
+                Err(error) => {
+                    result.insert("error".to_owned(), json!(error.to_string()));
+                }
+            }
+            Ok(Value::Object(result))
+        })();
+        match store {
+            Some(store) => Self::close_result(result, store.close()),
+            None => result,
+        }
+    }
+
+    /// Go's `plan_show`: the stored requests, optionally filtered by campaign
+    /// and status, under the campaign's label — or `all` when none was named.
+    ///
+    /// Go builds this through `campaign.GetPlan`, which passes neither a limit
+    /// nor an offset, so the answer is the whole matching set.
+    fn plan_show(&self, arguments: &Map<String, Value>) -> Result<Value, ToolError> {
+        self.with_open_store(|store| {
+            let campaign_id = get_str(arguments, "campaign_id", "");
+            let status = get_str(arguments, "status", "");
+            campaign::get_plan(store, &campaign_id, &status)
+                .map(Value::Object)
+                .map_err(|error| ToolError(error.to_string()))
+        })
+    }
+
+    /// Go's `list_requests`: a page of stored requests plus the total that
+    /// matches the campaign/status filter.
+    ///
+    /// The offset comes from the page number and the page size, and Go rejects
+    /// a non-positive value for either before it queries. The count keeps Go's
+    /// asymmetry: it filters by campaign and status, never by broker, so a
+    /// broker filter narrows the rows but not `total`.
+    /// Go's `get_dashboard_data`: the whole dashboard for every campaign.
+    fn dashboard_data(&self) -> Result<Value, ToolError> {
+        self.with_open_store(|store| {
+            let now = self.recorded_instant()?;
+            reporting::get_dashboard_data(store, "", now)
+                .map_err(|error| ToolError(error.to_string()))
+        })
+    }
+
+    /// Go's `get_calendar`: `weeks` defaults to 4, `campaign_id` to all.
+    fn calendar(&self, arguments: &Map<String, Value>) -> Result<Value, ToolError> {
+        self.with_open_store(|store| {
+            let now = self.recorded_instant()?;
+            reporting::get_calendar(
+                store,
+                &get_str(arguments, "campaign_id", ""),
+                get_int(arguments, "weeks", 4),
+                now,
+            )
+            .map_err(|error| ToolError(error.to_string()))
+        })
+    }
+
+    fn list_requests(&self, arguments: &Map<String, Value>) -> Result<Value, ToolError> {
+        self.with_open_store(|store| {
+            let page = get_int(arguments, "page", 1);
+            if page < 1 {
+                return Err(ToolError("page must be at least 1".to_owned()));
+            }
+            let page_size = get_int(arguments, "page_size", 100);
+            if page_size < 1 {
+                return Err(ToolError("page_size must be at least 1".to_owned()));
+            }
+            let campaign_id = optional_str(arguments, "campaign_id");
+            let status = optional_str(arguments, "status");
+            let repository = Repository::new(store);
+            let requests = repository
+                .list_removal_requests(ListRemovalRequestsOptions {
+                    campaign_id: campaign_id.clone(),
+                    status: status.clone(),
+                    broker_id: optional_str(arguments, "broker_id"),
+                    limit: Some(page_size),
+                    offset: Some((page - 1) * page_size),
+                })
+                .map_err(|error| ToolError(error.to_string()))?;
+            let total = repository
+                .count_removal_requests(campaign_id.as_deref(), status.as_deref())
+                .map_err(|error| ToolError(error.to_string()))?;
+            Ok(json!({
+                "requests": request_rows(requests),
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+            }))
+        })
+    }
+
+    /// Go's `get_events`: one request's events in replay order, resuming after
+    /// an event id when one was given.
+    fn get_events(&self, arguments: &Map<String, Value>) -> Result<Value, ToolError> {
+        self.with_open_store(|store| {
+            let events = Repository::new(store)
+                .get_events(
+                    get_int(arguments, "request_id", 0),
+                    get_int(arguments, "after_event_id", 0),
+                )
+                .map_err(|error| ToolError(error.to_string()))?;
+            event_list(events)
+        })
+    }
+    /// Go's `poll_inbox`: load IMAP settings from args/env, resolve password,
+    /// read active matchable requests + EvtSent thread map from the store,
+    /// poll with injected dialer (or production default), and return the
+    /// Go-exact payload shape. Byte-parity with `poll_inbox` fixtures
+    /// requires the scripted-server mailbox seed (language-neutral JSON)
+    /// mirrored from the Go oracle; see IMPLEMENTATION_REPORT_POLL_INBOX.md.
+    fn poll_inbox(&self, arguments: &Map<String, Value>) -> Result<Value, ToolError> {
+        // 1. Load IMAP config with explicit options (matches Go LoadIMAPConfigWithOptions).
+        let username_arg = get_str(arguments, "username", "");
+        let oauth_username_override = get_str(arguments, "oauth2_username", "");
+        let cfg_result = load_imap_config_with_options(ImapConfigOptions {
+            oauth2_access_token: Some(get_str(arguments, "oauth2_access_token", "")),
+            oauth2_username: Some(if oauth_username_override.is_empty() {
+                username_arg.clone()
+            } else {
+                oauth_username_override.clone()
+            }),
+        });
+        let mut cfg =
+            cfg_result.map_err(|e| ToolError(format!("email: cannot load IMAP config: {e}")))?;
+
+        // 2. Apply overrides exactly like Go handlePollInbox.
+        if let Some(host) = arguments.get("host").and_then(|value| value.as_str())
+            && !host.is_empty()
+        {
+            cfg.host = host.to_string();
+        }
+        if let Some(port) = arguments.get("port").and_then(|value| value.as_i64())
+            && port > 0
+        {
+            cfg.port = port;
+        }
+        if !username_arg.is_empty() {
+            cfg.username = username_arg.clone();
+        }
+        // Go rewrites the OAuth2 username in place. The override has to reach the
+        // configuration, so it is applied through a mutable borrow rather than a
+        // clone that goes out of scope.
+        if let Some(oauth) = cfg.oauth2.as_mut() {
+            if !oauth_username_override.is_empty() {
+                oauth.username = oauth_username_override.clone();
+            } else if !username_arg.is_empty() {
+                oauth.username = username_arg.clone();
+            }
+        }
+        // 3. Password resolution (Go resolves it through `identity.ResolveSecret`
+        // with the `IMAP_PASSWORD` env fallback and the `symeraseme-imap` keyring
+        // service, and skips resolution entirely for OAuth2).
+        if let Some(password) = arguments.get("password").and_then(|value| value.as_str())
+            && !password.is_empty()
+        {
+            let resolved = if cfg.oauth2.is_some() {
+                password.to_string()
+            } else {
+                let mut resolver = SecretResolver::with_environment(
+                    OsSecretBackend,
+                    std::env::vars().collect::<std::collections::BTreeMap<_, _>>(),
+                );
+                resolver.set_env_fallback("IMAP_PASSWORD");
+                resolver.set_keyring_service("symeraseme-imap");
+                resolver.set_keyring_username("IMAP_PASSWORD");
+                resolver
+                    .resolve(password)
+                    .map_err(|e| ToolError(format!("email: cannot resolve IMAP password: {e}")))?
+            };
+            cfg.password = resolved;
+        }
+        // 4. SSL / TLS override (Go handles both `ssl` and `use_tls`).
+        if let Some(use_tls) = arguments.get("ssl").and_then(|value| value.as_bool()) {
+            cfg.use_tls = use_tls;
+        } else if let Some(use_tls) = arguments.get("use_tls").and_then(|value| value.as_bool()) {
+            cfg.use_tls = use_tls;
+        }
+        // 5. Since / since_days / max_messages.
+        if let Some(days) = arguments.get("since_days").and_then(|value| value.as_i64())
+            && days > 0
+        {
+            cfg.since_days = days;
+        } else if let Some(days) = arguments.get("since").and_then(|value| value.as_i64())
+            && days > 0
+        {
+            cfg.since_days = days;
+        }
+        if let Some(max) = arguments
+            .get("max_messages")
+            .and_then(|value| value.as_i64())
+            && max > 0
+        {
+            cfg.max_messages = max;
+        }
+
+        // 6. Folder parsing (array / JSON-string / comma-string, default cfg.Folder or INBOX).
+        let mut folders = Vec::new();
+        if let Some(f_val) = arguments.get("folders") {
+            match f_val {
+                Value::Array(arr) => {
+                    for item in arr {
+                        if let Some(s) = item.as_str() {
+                            let trimmed = s.trim();
+                            if !trimmed.is_empty() {
+                                folders.push(trimmed.to_string());
+                            }
+                        }
+                    }
+                }
+                Value::String(s) => {
+                    let trimmed = s.trim();
+                    if !trimmed.is_empty() {
+                        if let Ok(parsed) = serde_json::from_str::<Vec<String>>(trimmed) {
+                            folders.extend(parsed.into_iter().filter(|x| !x.trim().is_empty()));
+                        } else {
+                            for part in trimmed.split(',') {
+                                let s = part.trim();
+                                if !s.is_empty() {
+                                    folders.push(s.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if folders.is_empty() {
+            if !cfg.folder.is_empty() {
+                folders.push(cfg.folder.clone());
+            } else {
+                folders.push("INBOX".to_string());
+            }
+        }
+
+        // 7. Campaign filter.
+        let campaign_id_filter = get_str(arguments, "campaign_id", "");
+
+        // 8. Read active matchable removal requests and build EvtSent thread map.
+        self.with_open_store(|store_ref| {
+            let repo = Repository::new(store_ref);
+            let active_reqs_result =
+                repo.get_active_matchable_requests(if campaign_id_filter.is_empty() {
+                    None
+                } else {
+                    Some(&campaign_id_filter)
+                });
+            let active_reqs = active_reqs_result
+                .map_err(|e| ToolError(format!("email: cannot read active requests: {e}")))?;
+            let mut removal_reqs = Vec::new();
+            let mut req_ids = Vec::new();
+            for row in &active_reqs {
+                req_ids.push(row.id);
+                removal_reqs.push(RemovalRequest {
+                    id: row.id,
+                    broker_id: row.broker_id.clone(),
+                });
+            }
+            let mut thread_map = HashMap::<String, i64>::new();
+            if !req_ids.is_empty() {
+                let evt_sent = symeraseme_core::storage::types::EventType::Sent;
+                let events_result = repo.get_events_for_requests(&req_ids, Some(&evt_sent));
+                let events_by_req = events_result
+                    .map_err(|e| ToolError(format!("email: cannot read events: {e}")))?;
+                for (rid, evts) in events_by_req {
+                    for ev in evts {
+                        // Go keeps only a non-empty string `message_id`; anything else
+                        // is skipped rather than recorded as a thread.
+                        if let Some(msg_id) = ev
+                            .payload
+                            .get("message_id")
+                            .and_then(|value| value.as_str())
+                            && !msg_id.is_empty()
+                        {
+                            thread_map.insert(msg_id.to_string(), rid);
+                        }
+                    }
+                }
+            }
+
+            // 9. Create the InboxService with injected (or default) dialer and HWM store.
+            let dialer_ref = self.imap_dialer.as_ref();
+            let hwm_store_ref = self.hwm_store.as_ref();
+
+            // Note: the production default dialer is symeraseme_core::email::imap::ImapDialer (new())
+            // and the default HWM store is MemoryHwmStore. When either is None,
+            // we fall back to the same behavior Go uses: a new default instance.
+            let matched = if let Some(d_ref) = dialer_ref {
+                let service = InboxService::new(d_ref.as_ref(), hwm_store_ref.map(|s| s.as_ref()));
+                service.poll_and_match(&cfg, &folders, &removal_reqs, &thread_map, None)
+            } else {
+                let default_dialer = symeraseme_core::email::imap::ImapDialer::new();
+                let default_service =
+                    InboxService::new(&default_dialer, hwm_store_ref.map(|s| s.as_ref()));
+                default_service.poll_and_match(&cfg, &folders, &removal_reqs, &thread_map, None)
+            };
+            let matched = matched.map_err(|e| ToolError(e.to_string()))?;
+
+            // 10. Build the result payload. Go returns a `map[string]any`, so the
+            // outer keys come out sorted, while the nested structs keep their
+            // declaration order — and `json.Marshal` HTML-escapes `<`, `>` and `&`.
+            // A `Value` here would re-sort the struct fields alphabetically and lose
+            // the escaping, so the payload is assembled as text and handed to the
+            // envelope verbatim (a string result is used as-is).
+            let total_fetched = matched.len() as i64;
+            let matched_count = matched.iter().filter(|m| m.request_id.is_some()).count() as i64;
+            let mut lines: Vec<String> = Vec::new();
+            lines.push(format!("Fetched {total_fetched} messages from inbox"));
+            lines.push(format!("Matched to requests: {matched_count}"));
+            for m in &matched {
+                let req_id_str = m
+                    .request_id
+                    .map(|id| format!("{id}"))
+                    .unwrap_or_else(|| "unmatched".to_owned());
+                let subj = if m.message.subject.is_empty() {
+                    "(no subject)".to_owned()
+                } else {
+                    m.message.subject.clone()
+                };
+                lines.push(format!("  [{req_id_str}] {subj}"));
+            }
+            if matched.is_empty() {
+                lines.push("No new messages found.".to_owned());
+            }
+            let messages = matched
+                .iter()
+                .map(go_matched_message_json)
+                .collect::<Vec<_>>()
+                .join(",");
+
+            Ok(Value::String(format!(
+                "{{\"message\":{},\"messages\":[{}],\"total_fetched\":{},\"total_matched\":{}}}",
+                go_json_string(&lines.join("\n")),
+                messages,
+                total_fetched,
+                matched_count
+            )))
+        })
+    }
+}
+
+/// Go answers a nil slice when a query matches nothing, which reaches a client
+/// as `null` — never as `[]`.
+pub fn request_rows(rows: Vec<RemovalRequestRow>) -> Value {
+    if rows.is_empty() {
+        return Value::Null;
+    }
+    Value::Array(rows.iter().map(request_row).collect())
+}
+
+/// Go answers a nil slice when a query matches nothing; see [`request_rows`].
+///
+/// Go marshals the `[]Event` result itself, and a Go *struct* keeps its field
+/// order — `ID`, `RequestID`, `OccurredAt`, … — where `serde_json::Value`'s map
+/// is alphabetical. The list is therefore rendered as JSON text and handed to
+/// the envelope as a string result, which Go's `contentEnvelope` passes through
+/// verbatim too. The Go escaping is applied here because that pass-through
+/// branch does not apply it.
+fn event_list(events: Vec<EventRecord>) -> Result<Value, ToolError> {
+    if events.is_empty() {
+        return Ok(Value::Null);
+    }
+    let wire: Vec<EventWire<'_>> = events.iter().map(EventWire::from).collect();
+    let serialized = serde_json::to_string(&wire).map_err(|error| ToolError(error.to_string()))?;
+    Ok(Value::String(
+        String::from_utf8(super::envelope::go_escape_json_strings(
+            serialized.as_bytes(),
+        ))
+        .expect("escaped JSON is UTF-8"),
+    ))
+}
+
+fn request_row(row: &RemovalRequestRow) -> Value {
+    json!({
+        "id": row.id,
+        "broker_id": row.broker_id,
+        "channel": row.channel,
+        "campaign_id": row.campaign_id,
+        "created_at": timestamp(&row.created_at),
+        "jurisdiction": row.jurisdiction,
+        "template_id": row.template_id,
+        "identity_snapshot_hash": row.identity_snapshot_hash,
+        "current_status": row.current_status,
+        "last_event_at": nullable_timestamp(&row.last_event_at),
+        "sent_at": nullable_timestamp(&row.sent_at),
+        "acknowledged_at": nullable_timestamp(&row.acknowledged_at),
+        "resolved_at": nullable_timestamp(&row.resolved_at),
+        "deadline_at": nullable_timestamp(&row.deadline_at),
+        "next_action_at": nullable_timestamp(&row.next_action_at),
+        "reminders_sent": row.reminders_sent,
+        "escalation_level": row.escalation_level,
+    })
+}
+
+/// Go marshals an `Event` **struct**, so the wire keeps Go's field order and
+/// field names (`ID`, `RequestID`, …) instead of the storage column names — and
+/// unlike the request maps it is not sorted alphabetically.
+#[derive(serde::Serialize)]
+struct EventWire<'a> {
+    #[serde(rename = "ID")]
+    id: i64,
+    #[serde(rename = "RequestID")]
+    request_id: i64,
+    #[serde(rename = "OccurredAt")]
+    occurred_at: String,
+    #[serde(rename = "RecordedAt")]
+    recorded_at: String,
+    #[serde(rename = "EventType")]
+    event_type: &'a str,
+    #[serde(rename = "Payload")]
+    payload: &'a Map<String, Value>,
+    #[serde(rename = "Source")]
+    source: &'a str,
+}
+
+impl<'a> From<&'a EventRecord> for EventWire<'a> {
+    fn from(event: &'a EventRecord) -> Self {
+        Self {
+            id: event.id,
+            request_id: event.request_id,
+            occurred_at: instant(event.occurred_at),
+            recorded_at: instant(event.recorded_at),
+            event_type: event.event_type.as_str(),
+            payload: &event.payload,
+            source: event.source.as_str(),
+        }
+    }
+}
+
+fn nullable_timestamp(value: &Option<String>) -> Value {
+    match value {
+        Some(value) => timestamp(value),
+        None => Value::Null,
+    }
+}
+
+/// Go reaches the wire through `database/sql`, which hands a `TIMESTAMP` column
+/// back as a `time.Time` and renders it as RFC 3339: the stored
+/// `2026-08-06 10:00:00` becomes `2026-08-06T10:00:00Z`. The wording of that
+/// value is the contract, so the raw column text is parsed and re-rendered
+/// rather than passed through.
+///
+/// ponytail: an unparseable column keeps its raw text instead of failing the
+/// call the way the Go driver does. The product's own writers only emit the two
+/// accepted layouts, so the boundary is unreachable through the product.
+fn timestamp(value: &str) -> Value {
+    match timeutil::parse(value) {
+        Ok(parsed) => Value::String(instant(parsed)),
+        Err(_) => Value::String(value.to_owned()),
+    }
+}
+
+/// Go's `time.Time` marshalling (`RFC3339Nano`). `AutoSi` keeps at most
+/// millisecond/microsecond/nanosecond digits; Go trims a trailing zero to any
+/// length, so a value with exactly one, four, five or seven fractional digits
+/// would differ. The product writes whole seconds.
+fn instant(value: DateTime<Utc>) -> String {
+    value.to_rfc3339_opts(SecondsFormat::AutoSi, true)
+}
+
+/// Go's `parsePollHours`: empty means "no override", and each value must be a
+/// clock hour.
+fn parse_poll_hours(raw: &str) -> Result<Vec<i32>, ToolError> {
+    if raw.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut hours = Vec::new();
+    for part in raw.split(',') {
+        let trimmed = part.trim();
+        let invalid = || {
+            ToolError(format!(
+                "invalid poll hour {trimmed:?}: choose values from 0 to 23"
+            ))
+        };
+        let value: i32 = trimmed.parse().map_err(|_| invalid())?;
+        if !(0..=23).contains(&value) {
+            return Err(invalid());
+        }
+        hours.push(value);
+    }
+    Ok(hours)
+}
+
+impl ToolHandler for ContractHandler {
+    fn call(&self, name: &str, arguments: &Map<String, Value>) -> Result<Value, ToolError> {
+        // Every tool payload Go builds is a `map[string]any`, so it is emitted
+        // with sorted keys. `manual_tasks_list` is the one exception: its
+        // `tasks` entries are marshalled from the `ManualTask` struct and keep
+        // that struct's declaration order, so it sorts its own top level
+        // instead of being sorted here.
+        if name == "manual_tasks_list" {
+            return self.manual_tasks_list(arguments);
+        }
+        // Go serializes map results with sorted keys but struct results in
+        // declaration order: `auto_confirm`, `schedule_install`, and
+        // `schedule_status` return structs, so their keys must not be reordered.
+        if matches!(
+            name,
+            "auto_confirm"
+                | "list_brokers"
+                | "schedule_install"
+                | "schedule_status"
+                | "classify_reply"
+                | "generate_rebuttal"
+        ) {
+            return self.call_go_map(name, arguments);
+        }
+        self.call_go_map(name, arguments).map(go_map_order)
+    }
+
+    fn call_cancellable(
+        &self,
+        name: &str,
+        arguments: &Map<String, Value>,
+        cancellation: &llm::CancellationToken,
+    ) -> Result<Value, ToolError> {
+        match name {
+            "classify_reply" => self.classify_reply(arguments, Some(cancellation)),
+            "generate_rebuttal" => self.generate_rebuttal(arguments, Some(cancellation)),
+            _ => self.call(name, arguments),
+        }
+    }
+}
+
+impl ContractHandler {
+    fn call_go_map(&self, name: &str, arguments: &Map<String, Value>) -> Result<Value, ToolError> {
+        match name {
+            "redact_file" => redact_file(&self.workspace_root, arguments),
+            "validate" => validate(&self.workspace_root, arguments),
+            "manual_tasks_show" => self.manual_tasks_show(arguments),
+            "manual_tasks_complete" => self.manual_tasks_complete(arguments),
+            "manual_tasks_cleanup" => self.manual_tasks_cleanup(arguments),
+            "grant" => self.grant(arguments),
+            "generate_scheduler" => self.generate_scheduler(arguments),
+            "generate_dashboard" => self.generate_dashboard(arguments),
+            "generate_report" => self.generate_report(arguments),
+            "plan_create" => self.plan_create(arguments),
+            "execute" => self.execute_campaign(arguments),
+            "plan_show" => self.plan_show(arguments),
+            "list_requests" => self.list_requests(arguments),
+            "get_dashboard_data" => self.dashboard_data(),
+            "get_calendar" => self.calendar(arguments),
+            "get_events" => self.get_events(arguments),
+            "list_brokers" => self.list_brokers(arguments),
+            "schedule_install" => self.schedule_install(arguments),
+            "schedule_uninstall" => self.schedule_uninstall(arguments),
+            "schedule_status" => self.schedule_status(arguments),
+            "poll_inbox" => self.poll_inbox(arguments),
+            "run_web_form" => self.run_web_form(arguments),
+            "auto_confirm" => self.auto_confirm(arguments),
+            "classify_reply" => self.classify_reply(arguments, None),
+            "generate_rebuttal" => self.generate_rebuttal(arguments, None),
+            other if !catalogue_has_tool(other) => Err(ToolError(DEFAULT_ERROR.to_owned())),
+            other => Err(ToolError(format!(
+                "tool {other} is not implemented in this slice"
+            ))),
+        }
+    }
+}
+
+/// Go's `redact_file`: read through the workspace guard, then redact with the
+/// default rules. Read failures stay opaque, matching Go's error text.
+fn redact_file(root: &Path, arguments: &Map<String, Value>) -> Result<Value, ToolError> {
+    let path = get_str(arguments, "path", "");
+    let content = read_workspace_file(Path::new(&path), Some(root))
+        .map_err(|error| ToolError(error.to_string()))?;
+    let redacted = redact_bytes(&content, None).map_err(|error| ToolError(error.to_string()))?;
+    Ok(Value::String(
+        String::from_utf8_lossy(&redacted).into_owned(),
+    ))
+}
+
+/// Go's `writeGeneratedFile`: resolve against the process working directory
+/// (`filepath.Abs`), create a missing parent, write the file with mode `0600`.
+/// Returns the absolute path, like Go.
+fn write_generated_file(path: &str, content: &[u8]) -> Result<String, ToolError> {
+    let current = std::env::current_dir().map_err(|error| ToolError(error.to_string()))?;
+    let absolute = current.join(path);
+    if let Some(parent) = absolute.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| ToolError(error.to_string()))?;
+    }
+    std::fs::write(&absolute, content).map_err(|error| ToolError(error.to_string()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&absolute, std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| ToolError(error.to_string()))?;
+    }
+    Ok(absolute.to_string_lossy().into_owned())
+}
+
+/// Go's `getStr`: a value of another type falls back to the default.
+fn confirmation_result(
+    success: bool,
+    step: &str,
+    error: String,
+    clicked_url: &str,
+    dry_run: bool,
+    task: Option<&manualtasks::ManualTask>,
+) -> Value {
+    let manual_action_required = task.is_some();
+    json!({
+        "Success": success,
+        "ClickedURL": clicked_url,
+        "ClickedHost": "",
+        "ClickedURLSHA256": "",
+        "Step": step,
+        "Error": error,
+        "ScreenshotBefore": "",
+        "ScreenshotAfter": "",
+        "ScreenshotBeforeSHA256": "",
+        "ScreenshotAfterSHA256": "",
+        "ScreenshotBeforeBytes": 0,
+        "ScreenshotAfterBytes": 0,
+        "DryRun": dry_run,
+        "TaskID": task.map_or(0, |task| task.id),
+        "Instructions": task.map_or("", |task| task.instructions.as_str()),
+        "Status": if manual_action_required { "manual_action_required" } else { "" },
+        "Reason": if manual_action_required { "dynamic_form" } else { "" },
+        "ManualActionRequired": manual_action_required,
+    })
+}
+
+fn get_str(arguments: &Map<String, Value>, key: &str, default: &str) -> String {
+    arguments
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or(default)
+        .to_owned()
+}
+
+/// One string field of a tool result; Go reads a missing map key as nil, and
+/// the manual-task builder only ever feeds string values through here.
+fn field_string(arguments: &Map<String, Value>, key: &str) -> String {
+    arguments
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// Go's `getStr` with an empty default, kept as an option: an absent or
+/// non-string value means "no filter".
+fn optional_str(arguments: &Map<String, Value>, key: &str) -> Option<String> {
+    arguments
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+/// Go's `getInt`: a missing or non-numeric value falls back to the default.
+fn get_int(arguments: &Map<String, Value>, key: &str, default: i64) -> i64 {
+    arguments
+        .get(key)
+        .and_then(|value| value.as_f64().map(|number| number as i64))
+        .unwrap_or(default)
+}
+
+/// Go's `getBool`: a value of another type falls back to the default.
+fn get_bool(arguments: &Map<String, Value>, key: &str, default: bool) -> bool {
+    arguments
+        .get(key)
+        .and_then(Value::as_bool)
+        .unwrap_or(default)
+}
+
+/// Go's `validate`: load (and thereby validate) a registry directory, or the
+/// embedded registry when no directory is given. A relative directory resolves
+/// against the workspace root, which stands in for Go's process working
+/// directory.
+///
+/// The response shape mirrors Go; only the success path is pinned against the
+/// oracle so far.
+fn validate(root: &Path, arguments: &Map<String, Value>) -> Result<Value, ToolError> {
+    let directory = get_str(arguments, "registry_dir", "");
+    let brokers = if directory.is_empty() {
+        load_embedded()
+    } else {
+        let requested = Path::new(&directory);
+        let resolved = if requested.is_absolute() {
+            requested.to_path_buf()
+        } else {
+            root.join(requested)
+        };
+        load_from_dir(&resolved)
+    }
+    .map_err(|error| ToolError(error.to_string()))?;
+    Ok(json!({
+        "schema_version": 1,
+        "ok": true,
+        "totals": {
+            "valid": brokers.len(),
+            "failed": 0,
+            "duplicate_ids": 0,
+        },
+    }))
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::{ToolError, ToolHandler};
+    use serde_json::{Map, Value};
+
+    /// Reproduces Go's handler-less default answer, so tests that only exercise
+    /// the JSON-RPC envelope keep the expectations pinned for that
+    /// configuration.
+    pub(crate) struct NoBackendHandler;
+
+    impl ToolHandler for NoBackendHandler {
+        fn call(&self, _name: &str, _arguments: &Map<String, Value>) -> Result<Value, ToolError> {
+            Err(ToolError("tool backend is not available".to_owned()))
+        }
+    }
+
+    pub(crate) fn no_backend_handler() -> NoBackendHandler {
+        NoBackendHandler
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mcp::protocol::{InitializeOutcome, initialize};
+    use serde::Deserialize;
+    use std::fs;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+    use std::time::{Duration, Instant};
+    use symeraseme_core::email::hwm::MemoryHwmStore;
+    use symeraseme_core::email::session::{FetchedMessage, ImapSession};
+    use symeraseme_core::email::types::ImapConfig;
+
+    #[derive(Deserialize)]
+    struct Case {
+        name: String,
+        request: String,
+        response: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    struct Fixture {
+        source_revision: String,
+        cases: Vec<Case>,
+    }
+
+    /// A workspace holding the files the fixture reads. Go resolves the
+    /// workspace to the process working directory; here the root is injected.
+    /// Each test gets its own root so parallel runs cannot delete each other's
+    /// files.
+    /// The recorded `operate-auto-confirm` bytes, without the trailing
+    /// newline `json_line` adds: the capital-key struct order is the contract.
+    #[test]
+    fn auto_confirm_answers_no_reply_without_a_stored_reply() {
+        let root = workspace("auto-confirm-no-reply");
+        let data_dir = root.join("data");
+        fs::create_dir_all(&data_dir).expect("data dir");
+        let mut environment = std::collections::BTreeMap::new();
+        environment.insert(
+            "SYMERASEME_DATA_DIR".to_owned(),
+            data_dir.to_string_lossy().into_owned(),
+        );
+        let now = DateTime::parse_from_rfc3339("2026-08-06T12:00:00+00:00")
+            .expect("pinned instant")
+            .with_timezone(&Utc);
+        let handler = ContractHandler::new(&root).with_store(
+            ConfigContext::new(root.clone(), root.clone(), environment),
+            now,
+        );
+        let mut arguments = Map::new();
+        arguments.insert("request_id".to_owned(), serde_json::json!(1));
+        arguments.insert("dry_run".to_owned(), serde_json::json!(true));
+        let result = handler.call("auto_confirm", &arguments).expect("result");
+        assert_eq!(
+            serde_json::to_string(&result).expect("serialize"),
+            r#"{"Success":false,"ClickedURL":"","ClickedHost":"","ClickedURLSHA256":"","Step":"no_reply","Error":"no inbox reply found for request #1","ScreenshotBefore":"","ScreenshotAfter":"","ScreenshotBeforeSHA256":"","ScreenshotAfterSHA256":"","ScreenshotBeforeBytes":0,"ScreenshotAfterBytes":0,"DryRun":true,"TaskID":0,"Instructions":"","Status":"","Reason":"","ManualActionRequired":false}"#
+        );
+    }
+
+    /// A stored link is previewed on dry-run, then queued as a manual task
+    /// without attempting a browser action.
+    #[test]
+    fn auto_confirm_previews_then_creates_manual_task_without_clicking() {
+        let raw = super::frozen_mcp_runtime::observation("mcp-auto-confirm");
+        let oracle: Value = serde_json::from_slice(&raw).expect("decode actual Go oracle output");
+        assert_eq!(
+            oracle["source_revision"],
+            "e8a8c969cb1a3b5a7f77dfe28f807e3707d0a8d8"
+        );
+        assert_eq!(oracle["go_version"], "go1.26.6");
+        let sources = oracle["sources_sha256"].as_object().unwrap();
+        assert_eq!(sources.len(), 7);
+        for (path, expected) in sources {
+            use sha2::{Digest, Sha256};
+            let actual = Sha256::digest(super::frozen_mcp_runtime::go_source_pin::current_source(
+                concat!(env!("CARGO_MANIFEST_DIR"), "/../.."),
+                path,
+            ))
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+            assert_eq!(expected.as_str().unwrap(), actual, "{path}");
+        }
+        let oracle_response = |key: &str| -> Value {
+            let frame: Value =
+                serde_json::from_str(oracle[key].as_str().expect("oracle process response"))
+                    .expect("decode Go MCP frame");
+            serde_json::from_str(
+                frame["result"]["content"][0]["text"]
+                    .as_str()
+                    .expect("MCP result text"),
+            )
+            .expect("decode Go tool result")
+        };
+
+        let root = workspace("auto-confirm-stored-reply");
+        let data_dir = root.join("data");
+        fs::create_dir_all(&data_dir).expect("data dir");
+        let store = Store::open(data_dir.join("symeraseme.db")).expect("open store");
+        store
+            .connection()
+            .execute_batch(
+                "INSERT INTO removal_requests (broker_id, campaign_id, jurisdiction) \
+                 VALUES ('broker-a', 'mcp-auto-confirm', 'GDPR'); \
+                 INSERT INTO inbox_replies (request_id, message_id, from_addr, snippet) \
+                 VALUES (1, 'msg-1', 'broker@example.com', 'Confirm here: https://acxiom.com/confirm'); \
+                 INSERT INTO removal_requests (broker_id, campaign_id, jurisdiction) \
+                 VALUES ('broker-b', 'mcp-auto-confirm', 'GDPR'); \
+                 INSERT INTO inbox_replies (request_id, message_id, from_addr, snippet) \
+                 VALUES (2, 'msg-2', 'broker@example.com', NULL);",
+            )
+            .expect("stored reply");
+        drop(store);
+        let mut environment = std::collections::BTreeMap::new();
+        environment.insert(
+            "SYMERASEME_DATA_DIR".to_owned(),
+            data_dir.to_string_lossy().into_owned(),
+        );
+        let now = DateTime::parse_from_rfc3339("2026-08-06T12:00:00+00:00")
+            .expect("pinned instant")
+            .with_timezone(&Utc);
+        let handler = ContractHandler::new(&root).with_store(
+            ConfigContext::new(root.clone(), root.clone(), environment),
+            now,
+        );
+        let call_wire = |arguments: &Map<String, Value>, key: &str| -> Value {
+            let request = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "auto_confirm", "arguments": arguments}});
+            let wire = match initialize(&serde_json::to_vec(&request).unwrap(), &handler) {
+                InitializeOutcome::Response(bytes) => bytes,
+                other => panic!("{key}: expected complete response, got {other:?}"),
+            };
+            assert_response_matches(
+                key,
+                Some(String::from_utf8(wire.clone()).unwrap()),
+                oracle[key].as_str(),
+            );
+            let envelope: Value = serde_json::from_slice(&wire).unwrap();
+            serde_json::from_str(envelope["result"]["content"][0]["text"].as_str().unwrap())
+                .unwrap()
+        };
+        let mut arguments = Map::new();
+        arguments.insert("request_id".to_owned(), serde_json::json!(1));
+        arguments.insert("dry_run".to_owned(), serde_json::json!(true));
+        let dry_run = call_wire(&arguments, "dry_run_response");
+        assert_eq!(dry_run, oracle_response("dry_run_response"));
+        assert_eq!(dry_run["Success"], true);
+        assert_eq!(dry_run["Step"], "dry_run");
+        assert_eq!(dry_run["ClickedURL"], "https://acxiom.com/confirm");
+        assert_eq!(dry_run["DryRun"], true);
+        assert_eq!(
+            Store::open(data_dir.join("symeraseme.db"))
+                .expect("reopen dry-run store")
+                .db()
+                .query_row("SELECT count(*) FROM manual_tasks", [], |row| row
+                    .get::<_, i64>(0))
+                .expect("dry-run tasks"),
+            0
+        );
+        assert_eq!(oracle["dry_run_state"]["tasks"], 0);
+        assert_eq!(oracle["dry_run_state"]["human_action_required_events"], 0);
+
+        arguments.insert("dry_run".to_owned(), serde_json::json!(false));
+        let result = call_wire(&arguments, "manual_response");
+        assert_eq!(result, oracle_response("manual_response"));
+        assert_eq!(result["Success"], false);
+        assert_eq!(result["Step"], "manual_confirmation_required");
+        assert_eq!(result["Status"], "manual_action_required");
+        assert_eq!(result["Reason"], "dynamic_form");
+        assert_eq!(result["ManualActionRequired"], true);
+        assert_eq!(result["ClickedURL"], "https://acxiom.com/confirm");
+        assert!(result["TaskID"].as_i64().unwrap_or_default() > 0);
+        let store = Store::open(data_dir.join("symeraseme.db")).expect("reopen final store");
+        assert_eq!(
+            store
+                .db()
+                .query_row("SELECT count(*) FROM manual_tasks", [], |row| row
+                    .get::<_, i64>(0))
+                .expect("task count"),
+            1
+        );
+        assert_eq!(
+            store
+                .db()
+                .query_row(
+                    "SELECT count(*) FROM request_events WHERE event_type = 'HUMAN_ACTION_REQUIRED'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .expect("human action events"),
+            1
+        );
+        assert_eq!(
+            store
+                .db()
+                .query_row(
+                    "SELECT count(*) FROM request_events WHERE event_type = 'CONFIRMATION_LINK_CLICKED'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .expect("click events"),
+            0
+        );
+        let oracle_state = &oracle["final_state"];
+        assert_eq!(oracle_state["tasks"], 1);
+        assert_eq!(oracle_state["human_action_required_events"], 1);
+        assert_eq!(oracle_state["confirmation_link_clicked_events"], 0);
+        assert_eq!(oracle_state["failure_notes"], 0);
+        let task_state: (String, String, String) = store
+            .db()
+            .query_row(
+                "SELECT form_url, instructions, status FROM manual_tasks ORDER BY id LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("manual task state");
+        assert_eq!(task_state.0, oracle_state["form_url"]);
+        assert_eq!(task_state.1, oracle_state["instructions"]);
+        assert_eq!(task_state.2, oracle_state["task_status"]);
+
+        arguments.insert("request_id".to_owned(), json!(2));
+        arguments.insert("dry_run".to_owned(), json!(true));
+        let no_links_dry = call_wire(&arguments, "no_links_dry_response");
+        assert_eq!(no_links_dry, oracle_response("no_links_dry_response"));
+        assert_eq!(no_links_dry["DryRun"], false);
+        arguments.insert("dry_run".to_owned(), json!(false));
+        let no_links = call_wire(&arguments, "no_links_response");
+        assert_eq!(no_links, oracle_response("no_links_response"));
+        let notes: i64 = store
+            .db()
+            .query_row(
+                "SELECT count(*) FROM request_events WHERE request_id = 2 AND event_type = 'NOTE_ADDED'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("no-links notes");
+        assert_eq!(notes, oracle["no_links_notes"]);
+    }
+
+    fn workspace(name: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("eraseme-mcp-003-{}-{name}", std::process::id()));
+        fs::create_dir_all(&root).expect("workspace");
+        fs::write(
+            root.join("pii.txt"),
+            "Contact jane.doe@example.com or 555-123-4567.\n",
+        )
+        .expect("pii fixture");
+        fs::write(root.join("clean.txt"), "No personal data here.\n").expect("clean fixture");
+
+        // The `validate` cases point at this relative directory, mirroring the
+        // oracle's workspace.
+        let registry = root.join("registry");
+        for sub in ["schemas", "brokers/eu", "brokers/uk", "brokers/us"] {
+            fs::create_dir_all(registry.join(sub)).expect("registry dir");
+        }
+        fs::write(
+            registry.join("manifest.json"),
+            r#"{"schema_version":1,"schemas":{"broker":"schemas/broker.schema.json"}}"#,
+        )
+        .expect("manifest");
+        fs::write(
+            registry.join("schemas/broker.schema.json"),
+            r#"{"schema_version":1}"#,
+        )
+        .expect("schema");
+        let fixtures =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/registry-contract");
+        for (sub, file) in [
+            ("eu", "golden-email-eu.yaml"),
+            ("uk", "golden-multi-uk.yaml"),
+            ("us", "golden-webform-us.yaml"),
+        ] {
+            fs::copy(
+                fixtures.join(file),
+                registry.join("brokers").join(sub).join(file),
+            )
+            .expect("copy broker fixture");
+        }
+        root
+    }
+
+    /// The store-backed read tools — `plan_show`, `list_requests`,
+    /// `get_events` — answer from rows frozen in `mcp-003-store/seed.sql`.
+    ///
+    /// The rows are fixture input rather than product output because Go stamps
+    /// `created_at`/`recorded_at` with `time.Now()` and offers no injection
+    /// point; a store the product wrote could not be pinned. The oracle applies
+    /// the same file to a store the handler created, so the bytes below are the
+    /// Go handler's own answer over identical rows.
+    #[test]
+    fn source_bound_go_store_read_fixtures_match() {
+        let seed = include_str!("../../../../tests/fixtures/mcp-contract/mcp-003-store/seed.sql");
+        store_read_fixture_matches(
+            "empty-cases",
+            include_str!("../../../../tests/fixtures/mcp-contract/mcp-003-store/empty-cases.json"),
+            None,
+        );
+        store_read_fixture_matches(
+            "seeded-cases",
+            include_str!("../../../../tests/fixtures/mcp-contract/mcp-003-store/seeded-cases.json"),
+            Some(seed),
+        );
+    }
+
+    /// Runs one store-read fixture family against a handler that resolves its
+    /// store from its own data directory, seeding the same rows the oracle did.
+    fn store_read_fixture_matches(name: &str, fixture_json: &str, seed: Option<&str>) {
+        use std::collections::BTreeMap;
+        use symeraseme_core::config::ConfigContext;
+
+        #[derive(Deserialize)]
+        struct StoreFixture {
+            source_revision: String,
+            cases: Vec<Case>,
+        }
+
+        let root = workspace(&format!("store-reads-{name}"));
+        let data_dir = root.join("data");
+        fs::create_dir_all(&data_dir).expect("data dir");
+        if let Some(seed) = seed {
+            let store = Store::open(data_dir.join("symeraseme.db")).expect("open store");
+            store
+                .connection()
+                .execute_batch(seed)
+                .expect("apply frozen rows");
+            drop(store);
+        }
+
+        let mut environment = BTreeMap::new();
+        environment.insert(
+            "SYMERASEME_DATA_DIR".to_owned(),
+            data_dir.to_string_lossy().into_owned(),
+        );
+        let now = DateTime::parse_from_rfc3339("2026-08-06T12:00:00+00:00")
+            .expect("pinned instant")
+            .with_timezone(&Utc);
+        let handler = ContractHandler::new(&root).with_store(
+            ConfigContext::new(root.clone(), root.clone(), environment),
+            now,
+        );
+
+        let fixture: StoreFixture = serde_json::from_str(fixture_json).expect("store fixture");
+        assert_eq!(
+            fixture.source_revision, "79bf23e83b31f18d98487101200eaf32749e5a46",
+            "{name}"
+        );
+        assert!(!fixture.cases.is_empty(), "{name} lost its cases");
+
+        for case in fixture.cases {
+            let actual = match initialize(case.request.as_bytes(), &handler) {
+                InitializeOutcome::Response(bytes) => Some(String::from_utf8(bytes).unwrap()),
+                InitializeOutcome::Notification => None,
+                InitializeOutcome::ParseError => {
+                    panic!("{} unexpectedly parsed as error", case.name)
+                }
+            };
+            assert_response_matches(&case.name, actual, case.response.as_deref());
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Compares a response the way the contract does, and names the first
+    /// differing byte instead of dumping two walls of escaped JSON.
+    fn assert_response_matches(name: &str, actual: Option<String>, expected: Option<&str>) {
+        let expected = expected.unwrap_or_default();
+        let actual = actual.unwrap_or_default();
+        if actual == expected {
+            return;
+        }
+        let index = actual
+            .bytes()
+            .zip(expected.bytes())
+            .position(|(left, right)| left != right)
+            .unwrap_or_else(|| actual.len().min(expected.len()));
+        let window = |text: &str| {
+            let end = (index + 120).min(text.len());
+            text[index..end].to_owned()
+        };
+        panic!(
+            "{name}: differs at byte {index} of {} (actual) / {} (expected)\n actual: {}\nexpected: {}",
+            actual.len(),
+            expected.len(),
+            window(&actual),
+            window(expected)
+        );
+    }
+
+    /// The payload's keys in the order it was serialised with.
+    fn keys(payload: &Value) -> Vec<&str> {
+        payload
+            .as_object()
+            .unwrap_or_else(|| panic!("expected an object, got {payload}"))
+            .keys()
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// Wraps one `tools/call` in the envelope and returns the whole response.
+    fn handler_call(handler: &ContractHandler, name: &str, arguments: &str) -> Value {
+        let arguments: Value = serde_json::from_str(arguments).expect("arguments");
+        let request = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        })
+        .to_string();
+        match initialize(request.as_bytes(), handler) {
+            InitializeOutcome::Response(bytes) => {
+                serde_json::from_slice(&bytes).expect("envelope JSON")
+            }
+            other => panic!("expected a response for {name}, got {other:?}"),
+        }
+    }
+
+    /// The branches the frozen-row fixtures do not reach: a handler without a
+    /// store configuration, and a `TIMESTAMP` column whose text the parse does
+    /// not accept.
+    #[test]
+    fn store_read_tools_need_a_store_and_keep_unparsable_timestamps() {
+        use std::collections::BTreeMap;
+        use symeraseme_core::config::ConfigContext;
+
+        let root = workspace("store-read-boundaries");
+
+        let bare = ContractHandler::new(&root);
+        for (name, arguments) in [
+            ("plan_show", "{}"),
+            ("list_requests", "{}"),
+            ("get_events", r#"{"request_id":1}"#),
+        ] {
+            let rejected = handler_call(&bare, name, arguments);
+            assert!(
+                rejected["error"]["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("the store-backed tools need a configuration"),
+                "{name}: {rejected}"
+            );
+        }
+
+        let data_dir = root.join("data");
+        fs::create_dir_all(&data_dir).expect("data dir");
+        let store = Store::open(data_dir.join("symeraseme.db")).expect("open store");
+        store
+            .connection()
+            .execute_batch(
+                "INSERT INTO removal_requests (id, broker_id, channel, campaign_id, \
+                 created_at, jurisdiction) VALUES (1, 'broker-t', 'email', 'campaign-t', \
+                 'not a timestamp', 'GDPR');",
+            )
+            .expect("seed unparsable row");
+        drop(store);
+
+        let mut environment = BTreeMap::new();
+        environment.insert(
+            "SYMERASEME_DATA_DIR".to_owned(),
+            data_dir.to_string_lossy().into_owned(),
+        );
+        let now = DateTime::parse_from_rfc3339("2026-08-06T12:00:00+00:00")
+            .expect("pinned instant")
+            .with_timezone(&Utc);
+        let handler = ContractHandler::new(&root).with_store(
+            ConfigContext::new(root.clone(), root.clone(), environment),
+            now,
+        );
+
+        let response = handler_call(&handler, "plan_show", "{}");
+        let payload: Value = serde_json::from_str(
+            response["result"]["content"][0]["text"]
+                .as_str()
+                .expect("payload text"),
+        )
+        .expect("payload JSON");
+        assert_eq!(payload["campaign_id"], "all");
+        assert_eq!(payload["total"], 1);
+        // ponytail: Go's driver rejects the value; this port keeps the raw text
+        // rather than inventing a failure the storage contract does not name.
+        assert_eq!(payload["requests"][0]["created_at"], "not a timestamp");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Every file-based case is a response Go's real `ContractHandler` produced,
+    /// so these bytes are product behaviour rather than a stub's answer.
+    #[test]
+    fn source_bound_go_tools_call_fixture_matches() {
+        let root = workspace("tools-call");
+        let handler = ContractHandler::new(&root);
+        let fixture: Fixture = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/mcp-contract/mcp-003/cases.json"
+        ))
+        .expect("tools/call fixture");
+        assert_eq!(
+            fixture.source_revision,
+            "79bf23e83b31f18d98487101200eaf32749e5a46"
+        );
+        assert_eq!(fixture.cases.len(), 8, "fixture case count changed");
+
+        for case in fixture.cases {
+            let actual = match initialize(case.request.as_bytes(), &handler) {
+                InitializeOutcome::Response(bytes) => Some(String::from_utf8(bytes).unwrap()),
+                InitializeOutcome::Notification => None,
+                InitializeOutcome::ParseError => {
+                    panic!("{} unexpectedly parsed as error", case.name)
+                }
+            };
+            assert_eq!(actual, case.response, "{}", case.name);
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The manual-task tools answer from an isolated store. The Go oracle pins
+    /// the stored task timestamp so list and detail responses are byte-stable.
+    #[test]
+    fn source_bound_go_manual_task_fixture_matches() {
+        use std::collections::BTreeMap;
+        use symeraseme_core::config::ConfigContext;
+        use symeraseme_core::manualtasks;
+        use symeraseme_core::storage::repository::Repository;
+
+        let root = workspace("manual-tasks");
+        let data_dir = root.join("data");
+        fs::create_dir_all(&data_dir).expect("data dir");
+        let now = DateTime::parse_from_rfc3339("2026-08-06T12:00:00+00:00")
+            .expect("pinned instant")
+            .with_timezone(&Utc);
+
+        let mut environment = BTreeMap::new();
+        environment.insert(
+            "SYMERASEME_DATA_DIR".to_owned(),
+            data_dir.to_string_lossy().into_owned(),
+        );
+        let config = ConfigContext::new(root.clone(), root.clone(), environment);
+
+        // Seed what the oracle seeded: one request and one pending task.
+        let store = Store::open(data_dir.join("symeraseme.db")).expect("open store");
+        let request_id = Repository::new(&store)
+            .create_removal_request("broker-a", "web_form", "mcp-003", "CCPA", "", "")
+            .expect("request");
+        let mut opts = manualtasks::CreateOpts {
+            request_id: Some(request_id),
+            broker_id: "broker-a".to_owned(),
+            broker_name: "Broker A".to_owned(),
+            form_url: "https://broker-a.example/optout".to_owned(),
+            reason: "captcha_failed".to_owned(),
+            ..manualtasks::CreateOpts::default()
+        };
+        opts.html_snapshot.clear();
+        let task = manualtasks::create(&store, &opts, None, now).expect("seed task");
+        assert_eq!(task.id, 1, "fixture expects the first task id");
+        store
+            .connection()
+            .execute(
+                "UPDATE manual_tasks SET created_at = '2026-08-06 12:00:00' WHERE id = 1",
+                [],
+            )
+            .expect("pin manual task timestamp");
+        drop(store);
+        let tasks_dir = data_dir.join("manual_tasks");
+        fs::create_dir_all(&tasks_dir).expect("manual task artifacts dir");
+        fs::write(tasks_dir.join("evidence.png"), "artifact").expect("seed artifact");
+        fs::write(tasks_dir.join("keep.txt"), "keep").expect("seed unrelated file");
+
+        let handler = ContractHandler::new(&root)
+            .with_store(config, now)
+            .with_data_dir(&data_dir);
+
+        let fixture: Fixture = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/mcp-contract/mcp-manual-tasks/cases.json"
+        ))
+        .expect("manual-task fixture");
+        assert_eq!(
+            fixture.source_revision,
+            "42614bc27527711baec9b3e9d2805ce1e1dee185"
+        );
+        assert_eq!(fixture.cases.len(), 8, "fixture case count changed");
+
+        for case in fixture.cases {
+            let actual = match initialize(case.request.as_bytes(), &handler) {
+                InitializeOutcome::Response(bytes) => {
+                    let mut envelope: Value = serde_json::from_slice(&bytes).unwrap();
+                    if let Some(text) = envelope["result"]["content"][0]["text"].as_str() {
+                        let mut content: Value = serde_json::from_str(text).unwrap();
+                        if let Some(message) = content["message"].as_str() {
+                            let normalized = message
+                                .replace(root.to_string_lossy().as_ref(), "ORACLE_ROOT")
+                                .replace(
+                                    "ORACLE_ROOT\\data\\manual_tasks",
+                                    "ORACLE_ROOT/data/manual_tasks",
+                                );
+                            content["message"] = json!(normalized);
+                        }
+                        envelope["result"]["content"][0]["text"] =
+                            json!(serde_json::to_string(&content).unwrap());
+                    }
+                    let mut normalized = serde_json::to_vec(&envelope).unwrap();
+                    normalized.push(b'\n');
+                    Some(String::from_utf8(normalized).unwrap())
+                }
+                InitializeOutcome::Notification => None,
+                InitializeOutcome::ParseError => {
+                    panic!("{} unexpectedly parsed as error", case.name)
+                }
+            };
+            assert_eq!(actual, case.response, "{}", case.name);
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Covers list/show branches and optional task fields outside the oracle
+    /// fixture's pinned populated-task case.
+    #[test]
+    fn manual_task_shapes_and_unreached_branches() {
+        use std::collections::BTreeMap;
+        use symeraseme_core::config::ConfigContext;
+        use symeraseme_core::manualtasks;
+        use symeraseme_core::storage::repository::Repository;
+
+        let root = workspace("manual-shapes");
+        let data_dir = root.join("data");
+        fs::create_dir_all(&data_dir).expect("data dir");
+        let now = DateTime::parse_from_rfc3339("2026-08-06T12:00:00+00:00")
+            .expect("pinned instant")
+            .with_timezone(&Utc);
+        let mut environment = BTreeMap::new();
+        environment.insert(
+            "SYMERASEME_DATA_DIR".to_owned(),
+            data_dir.to_string_lossy().into_owned(),
+        );
+        let config = ConfigContext::new(root.clone(), root.clone(), environment);
+
+        let store = Store::open(data_dir.join("symeraseme.db")).expect("open store");
+        let request_id = Repository::new(&store)
+            .create_removal_request("broker-a", "web_form", "mcp-003", "CCPA", "", "")
+            .expect("request");
+        let opts = manualtasks::CreateOpts {
+            request_id: Some(request_id),
+            broker_id: "broker-a".to_owned(),
+            broker_name: "Broker A".to_owned(),
+            form_url: "https://broker-a.example/optout".to_owned(),
+            reason: "captcha_failed".to_owned(),
+            ..manualtasks::CreateOpts::default()
+        };
+        manualtasks::create(&store, &opts, None, now).expect("seed task");
+        drop(store);
+
+        let handler = ContractHandler::new(&root)
+            .with_store(config, now)
+            .with_data_dir(&data_dir)
+            .clone();
+
+        let call_envelope = |arguments: &str, name: &str| -> Value {
+            // Build the request through serde_json so argument values are
+            // escaped correctly — a Windows path contains backslashes, which
+            // manual string formatting turns into invalid JSON.
+            let arguments: Value = serde_json::from_str(arguments).expect("arguments are JSON");
+            let request = json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": arguments},
+            })
+            .to_string();
+            match initialize(request.as_bytes(), &handler) {
+                InitializeOutcome::Response(bytes) => {
+                    serde_json::from_slice(&bytes).expect("envelope JSON")
+                }
+                other => panic!("expected a response for {name}, got {other:?}"),
+            }
+        };
+        // The tool payload is a JSON string inside the content envelope.
+        let call = |arguments: &str, name: &str| -> Value {
+            let envelope = call_envelope(arguments, name);
+            let text = envelope["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or_else(|| panic!("expected a payload, got {envelope}"));
+            serde_json::from_str(text).expect("payload JSON")
+        };
+
+        // `list`: shape only, because the message embeds created_at.
+        let listed = call("{}", "manual_tasks_list");
+        assert_eq!(listed["success"], true, "list payload: {listed}");
+        assert_eq!(listed["tasks"].as_array().expect("tasks").len(), 1);
+        assert_eq!(listed["tasks"][0]["broker_name"], "Broker A");
+        assert_eq!(listed["tasks"][0]["reason"], "captcha_failed");
+        assert!(
+            listed["message"]
+                .as_str()
+                .expect("message")
+                .starts_with("Manual tasks (1):")
+        );
+
+        // Key order, which the empty-`tasks` oracle case cannot pin: Go
+        // marshals the nested task objects of `list` from the `ManualTask`
+        // struct, so they keep its declaration order, while `Result` itself and
+        // `show`'s `taskMap` go through a Go map and come out sorted.
+        assert_eq!(
+            keys(&listed),
+            vec!["message", "success", "tasks"],
+            "list payload: {listed}"
+        );
+        assert_eq!(
+            keys(&listed["tasks"][0]),
+            vec![
+                "id",
+                "request_id",
+                "broker_id",
+                "broker_name",
+                "form_url",
+                "reason",
+                "instructions",
+                "screenshot_path",
+                "html_snapshot_path",
+                "form_fields_json",
+                "status",
+                "created_at",
+                "completed_at",
+                "notes",
+            ],
+            "nested task: {listed}"
+        );
+
+        // `show` detail: the message block plus the task map.
+        let shown = call(r#"{"task_id":1}"#, "manual_tasks_show");
+        let mut sorted_show_keys = keys(&shown);
+        sorted_show_keys.sort_unstable();
+        assert_eq!(keys(&shown), sorted_show_keys, "show payload: {shown}");
+        assert_eq!(shown["success"], true);
+        assert_eq!(shown["id"], 1);
+        let message = shown["message"].as_str().expect("message");
+        assert!(
+            message.contains("Broker:     Broker A (broker-a)"),
+            "{message}"
+        );
+        assert!(message.contains("URL:        https://broker-a.example/optout"));
+        assert!(message.contains("Instructions:"));
+
+        // `complete` on the seeded task: Go's map order again.
+        let completed = call(r#"{"task_id":1,"notes":"done"}"#, "manual_tasks_complete");
+        assert_eq!(
+            keys(&completed),
+            vec!["message", "success", "task_id"],
+            "complete payload: {completed}"
+        );
+
+        // `complete` on a missing task: the shared not-found text.
+        let missing = call(r#"{"task_id":999}"#, "manual_tasks_complete");
+        assert_eq!(missing["success"], false);
+        assert_eq!(
+            missing["error"],
+            "Manual task #999 not found. Run 'symeraseme manual-tasks list' to see available tasks."
+        );
+        assert!(missing.get("message").is_none(), "message must be dropped");
+
+        // `cleanup` with an existing directory: counts plus the dry-run text.
+        let tasks_dir = data_dir.join("manual_tasks");
+        fs::create_dir_all(&tasks_dir).expect("tasks dir");
+        fs::write(tasks_dir.join("a.png"), b"png").expect("artifact");
+        let cleaned = call(r#"{"dry_run":true}"#, "manual_tasks_cleanup");
+        assert_eq!(cleaned["success"], true);
+        assert_eq!(cleaned["skipped"], 1);
+        assert_eq!(cleaned["removed"], 0);
+        assert_eq!(cleaned["dry_run"], true);
+        assert!(
+            cleaned["message"]
+                .as_str()
+                .expect("message")
+                .starts_with("Would remove 1 artifact(s) from")
+        );
+
+        // `validate` without a directory uses the embedded registry, and an
+        // absolute directory is honoured as given.
+        let embedded = call("{}", "validate");
+        assert_eq!(embedded["ok"], true);
+        assert!(embedded["totals"]["valid"].as_i64().expect("valid") > 0);
+        // The path goes through serde_json so a Windows backslash cannot
+        // produce invalid JSON.
+        let absolute_arguments =
+            json!({"registry_dir": root.join("registry").to_string_lossy()}).to_string();
+        let absolute = call(&absolute_arguments, "validate");
+        assert_eq!(absolute["totals"]["valid"], 3);
+
+        // The writing tool fails explicitly when no instant was injected.
+        let without_clock = ContractHandler::new(&root);
+        let outcome = initialize(
+            br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"manual_tasks_complete","arguments":{"task_id":1}}}"#,
+            &without_clock,
+        );
+        match outcome {
+            InitializeOutcome::Response(bytes) => {
+                let text = String::from_utf8(bytes).expect("UTF-8");
+                assert!(text.contains("configuration"), "{text}");
+            }
+            other => panic!("expected a response, got {other:?}"),
+        }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `plan_create` answers with the removal-request ids it just created, so
+    /// the oracle records the response only in its isolated store. This test
+    /// checks the result shape and the missing/corrupt profile branches.
+    #[test]
+    fn plan_create_shape_and_profile_paths() {
+        use std::collections::BTreeMap;
+        use symeraseme_core::config::ConfigContext;
+
+        let root = workspace("plan-create");
+        let data_dir = root.join("data");
+        fs::create_dir_all(&data_dir).expect("data dir");
+        let now = DateTime::parse_from_rfc3339("2026-08-06T12:00:00+00:00")
+            .expect("pinned instant")
+            .with_timezone(&Utc);
+        let mut environment = BTreeMap::new();
+        environment.insert(
+            "SYMERASEME_DATA_DIR".to_owned(),
+            data_dir.to_string_lossy().into_owned(),
+        );
+        let config = ConfigContext::new(root.clone(), root.clone(), environment);
+        let handler = ContractHandler::new(&root).with_store(config, now);
+
+        let call = |arguments: &str, name: &str| -> Value {
+            let arguments: Value = serde_json::from_str(arguments).expect("arguments");
+            let request = json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": name, "arguments": arguments},
+            })
+            .to_string();
+            match initialize(request.as_bytes(), &handler) {
+                InitializeOutcome::Response(bytes) => {
+                    serde_json::from_slice(&bytes).expect("envelope JSON")
+                }
+                other => panic!("expected a response, got {other:?}"),
+            }
+        };
+
+        let planned = call(
+            &json!({
+                "campaign_id": "mcp-plan",
+                "max_brokers": 2,
+                "profile_path": root.join("missing-profile.enc").to_string_lossy(),
+            })
+            .to_string(),
+            "plan_create",
+        );
+        let payload = &planned["result"]["content"][0]["text"];
+        let payload: Value =
+            serde_json::from_str(payload.as_str().expect("payload is a JSON string"))
+                .expect("payload JSON");
+        assert_eq!(payload["campaign_id"], "mcp-plan");
+        assert!(payload["total_brokers"].as_i64().expect("total") > 1000);
+        assert_eq!(payload["planned"], 2);
+        let requests = payload["requests"].as_array().expect("requests");
+        assert_eq!(requests.len(), 2);
+        // The embedded registry is ordered, so the first two brokers are fixed.
+        assert_eq!(requests[0]["broker_id"], "0ptimus-analytics-us");
+        assert_eq!(requests[0]["request_id"], 1);
+        assert_eq!(requests[1]["request_id"], 2);
+
+        // A missing profile is valid and hashes as the empty identity. An
+        // existing malformed envelope is loaded and reports Go's profile
+        // corruption error before any keyring lookup.
+        let missing = call(
+            &json!({
+                "campaign_id": "missing-profile",
+                "profile_path": root.join("missing-profile.enc").to_string_lossy(),
+                "max_brokers": 1,
+            })
+            .to_string(),
+            "plan_create",
+        );
+        assert!(missing["result"].is_object(), "{missing}");
+
+        let malformed_path = root.join("malformed-profile.enc");
+        fs::write(&malformed_path, b"not-an-encrypted-profile").expect("malformed profile");
+        let malformed = call(
+            &json!({
+                "campaign_id": "malformed-profile",
+                "profile_path": malformed_path.to_string_lossy(),
+            })
+            .to_string(),
+            "plan_create",
+        );
+        assert_eq!(
+            malformed["error"]["message"],
+            "identity: profile corrupt: no header separator"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `list_brokers` answers with the registry itself, so the oracle could not
+    /// record it without duplicating ~1 MB of embedded data. The counts and the
+    /// filter echo below are the values Go's real handler produced when the
+    /// oracle measured them.
+    #[test]
+    fn list_brokers_shape_matches_the_measured_handler_answers() {
+        let root = workspace("list-brokers");
+        let handler = ContractHandler::new(&root);
+        let call = |arguments: &str| -> Value {
+            let arguments: Value = serde_json::from_str(arguments).expect("arguments");
+            let request = json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "list_brokers", "arguments": arguments},
+            })
+            .to_string();
+            match initialize(request.as_bytes(), &handler) {
+                InitializeOutcome::Response(bytes) => {
+                    let envelope: Value = serde_json::from_slice(&bytes).expect("envelope JSON");
+                    let text = envelope["result"]["content"][0]["text"]
+                        .as_str()
+                        .expect("payload text");
+                    serde_json::from_str(text).expect("payload JSON")
+                }
+                other => panic!("expected a response, got {other:?}"),
+            }
+        };
+
+        // include_inactive makes Go ignore the status filter, so both statuses
+        // come back.
+        let all = call(r#"{"status":"out-of-business","include_inactive":true}"#);
+        assert_eq!(all["schema_version"], 1);
+        assert_eq!(all["count"], 1274);
+        assert_eq!(all["filters"]["status"], "out-of-business");
+        assert_eq!(all["filters"]["include_disabled"], false);
+        assert_eq!(all["brokers"][0]["id"], "0ptimus-analytics-us");
+
+        // The default is the active registry.
+        let active = call("{}");
+        assert_eq!(active["count"], 1273);
+        assert_eq!(active["filters"]["status"], "active");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `schedule_install` accepts only the platform and the tick time, so its
+    /// templates embed paths from the engine's defaults — under `go run` the
+    /// resolved binary lives in a fresh temp directory each time, which is why
+    /// the oracle could not record the answer. The file *names* are stable and
+    /// are asserted here against the set Go's real handler produced.
+    #[test]
+    fn schedule_install_dry_run_shape() {
+        let root = workspace("schedule-install");
+        let handler = ContractHandler::new(&root);
+        let call = |arguments: &str| -> Value {
+            let arguments: Value = serde_json::from_str(arguments).expect("arguments");
+            let request = json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "schedule_install", "arguments": arguments},
+            })
+            .to_string();
+            match initialize(request.as_bytes(), &handler) {
+                InitializeOutcome::Response(bytes) => {
+                    serde_json::from_slice(&bytes).expect("envelope JSON")
+                }
+                other => panic!("expected a response, got {other:?}"),
+            }
+        };
+
+        let installed =
+            call(r#"{"dry_run":true,"platform":"cron","tick_hour":9,"tick_minute":30}"#);
+        let text = installed["result"]["content"][0]["text"]
+            .as_str()
+            .expect("payload text");
+        let payload: Value = serde_json::from_str(text).expect("payload JSON");
+        assert_eq!(payload["success"], true);
+        assert_eq!(payload["dry_run"], true);
+        let mut names: Vec<&str> = payload["files"]
+            .as_object()
+            .expect("files")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            vec![
+                "crontab.txt",
+                "install.sh",
+                "symeraseme-poll.sh",
+                "symeraseme-rescan.sh",
+                "symeraseme-tick.sh",
+                "uninstall.sh",
+            ]
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The Go oracle's mailbox script, replayed by the Rust transport.
+    ///
+    /// Both sides read `mcp-003-poll/mailbox.json`, so a difference in the
+    /// answer is a port defect and not a difference in the fake. `search_uid`
+    /// ignores its window on purpose: the policy computes that window from the
+    /// wall clock, so honouring it would make the recorded answer move.
+    struct ScriptedDialer {
+        folders: HashMap<String, ScriptedFolder>,
+    }
+
+    #[derive(Clone)]
+    struct ScriptedFolder {
+        uid_validity: u32,
+        messages: Vec<ScriptedMessage>,
+    }
+
+    #[derive(Clone, Deserialize)]
+    struct ScriptedMessage {
+        uid: u32,
+        flags: Vec<String>,
+        internal_date: String,
+        header: String,
+        body: String,
+    }
+
+    #[derive(Deserialize)]
+    struct ScriptedFolderDocument {
+        uid_validity: u32,
+        messages: Vec<ScriptedMessage>,
+    }
+
+    #[derive(Deserialize)]
+    struct MailboxScript {
+        folders: HashMap<String, ScriptedFolderDocument>,
+    }
+
+    impl ScriptedDialer {
+        fn from_fixture() -> Self {
+            let script: MailboxScript = serde_json::from_str(include_str!(
+                "../../../../tests/fixtures/mcp-contract/mcp-003-poll/mailbox.json"
+            ))
+            .expect("mailbox script");
+            Self {
+                folders: script
+                    .folders
+                    .into_iter()
+                    .map(|(name, folder)| {
+                        (
+                            name,
+                            ScriptedFolder {
+                                uid_validity: folder.uid_validity,
+                                messages: folder.messages,
+                            },
+                        )
+                    })
+                    .collect(),
+            }
+        }
+    }
+
+    struct ScriptedSession {
+        folders: HashMap<String, ScriptedFolder>,
+        messages: Vec<ScriptedMessage>,
+    }
+
+    impl ImapDialer for ScriptedDialer {
+        fn dial(&self, _config: &ImapConfig) -> Result<Box<dyn ImapSession>, String> {
+            Ok(Box::new(ScriptedSession {
+                folders: self.folders.clone(),
+                messages: Vec::new(),
+            }))
+        }
+    }
+
+    impl ImapSession for ScriptedSession {
+        fn select(&mut self, folder: &str) -> Result<u32, String> {
+            let Some(selected) = self.folders.get(folder) else {
+                return Err(format!("scripted mailbox has no folder {folder:?}"));
+            };
+            self.messages = selected.messages.clone();
+            Ok(selected.uid_validity)
+        }
+
+        fn search_uid(
+            &mut self,
+            uid_range: &str,
+            _since: Option<DateTime<Utc>>,
+        ) -> Result<Vec<u32>, String> {
+            let (low, high) = uid_bounds(uid_range);
+            Ok(self
+                .messages
+                .iter()
+                .map(|message| message.uid)
+                .filter(|uid| *uid >= low && *uid <= high)
+                .collect())
+        }
+
+        fn fetch(&mut self, uids: &[u32]) -> Result<Vec<FetchedMessage>, String> {
+            let mut out = Vec::with_capacity(uids.len());
+            for uid in uids {
+                let Some(message) = self.messages.iter().find(|message| message.uid == *uid) else {
+                    return Err(format!("scripted mailbox has no uid {uid}"));
+                };
+                let internal_date = DateTime::parse_from_rfc3339(&message.internal_date)
+                    .map_err(|error| error.to_string())?
+                    .with_timezone(&Utc);
+                out.push(FetchedMessage {
+                    uid: message.uid,
+                    header: message.header.clone().into_bytes(),
+                    body: message.body.clone().into_bytes(),
+                    flags: Some(message.flags.clone()),
+                    internal_date: Some(internal_date),
+                });
+            }
+            Ok(out)
+        }
+
+        fn close(&mut self) {}
+    }
+
+    /// The policy's `<low>:<high>` UID range; `*` is the open end. Mirrors the
+    /// oracle's own reader so both sides search the same window.
+    fn uid_bounds(uid_range: &str) -> (u32, u32) {
+        let mut parts = uid_range.splitn(2, ':');
+        let low = parts
+            .next()
+            .filter(|part| !part.is_empty() && *part != "*")
+            .and_then(|part| part.parse::<u32>().ok())
+            .unwrap_or(1);
+        let high = parts
+            .next()
+            .filter(|part| !part.is_empty() && *part != "*")
+            .and_then(|part| part.parse::<u32>().ok())
+            .unwrap_or(u32::MAX);
+        (low, high)
+    }
+
+    /// `poll_inbox` answers the Go oracle's own recorded bytes.
+    ///
+    /// The oracle drives the real Go handler with an injected dialer and
+    /// high-water-mark store, so the recorded responses are Go's answer over the
+    /// same scripted mailbox and the same frozen rows. Every request is replayed
+    /// through the same dispatch entry the product uses, which keeps the
+    /// catalogue's argument gate in the path — the "missing required argument"
+    /// and "invalid parameter type" cases only pass if that gate still runs
+    /// first.
+    #[test]
+    fn source_bound_poll_inbox_fixture_matches() {
+        use std::collections::BTreeMap;
+        use symeraseme_core::config::ConfigContext;
+
+        #[derive(Deserialize)]
+        struct PollCase {
+            name: String,
+            request: Option<String>,
+            response: Option<String>,
+            #[serde(default)]
+            parse_error: bool,
+        }
+
+        #[derive(Deserialize)]
+        struct PollFixture {
+            source_revision: String,
+            seed: String,
+            cases: Vec<PollCase>,
+        }
+
+        let fixture: PollFixture = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/mcp-contract/mcp-003-poll/cases.json"
+        ))
+        .expect("poll fixture");
+        assert_eq!(
+            fixture.source_revision, "79bf23e83b31f18d98487101200eaf32749e5a46",
+            "poll fixture source revision"
+        );
+        assert!(!fixture.cases.is_empty(), "poll fixture lost its cases");
+        assert_eq!(
+            fixture.seed, "tests/fixtures/mcp-contract/mcp-003-poll/seed.sql",
+            "poll fixture seed"
+        );
+
+        let root = workspace("poll-inbox");
+        let data_dir = root.join("data");
+        fs::create_dir_all(&data_dir).expect("data dir");
+        let store = Store::open(data_dir.join("symeraseme.db")).expect("open store");
+        store
+            .connection()
+            .execute_batch(include_str!(
+                "../../../../tests/fixtures/mcp-contract/mcp-003-poll/seed.sql"
+            ))
+            .expect("apply frozen rows");
+        drop(store);
+
+        let mut environment = BTreeMap::new();
+        environment.insert(
+            "SYMERASEME_DATA_DIR".to_owned(),
+            data_dir.to_string_lossy().into_owned(),
+        );
+        let now = DateTime::parse_from_rfc3339("2026-08-06T12:00:00+00:00")
+            .expect("pinned instant")
+            .with_timezone(&Utc);
+
+        for case in &fixture.cases {
+            // A fresh high-water-mark store per case, exactly like the oracle:
+            // a shared one would advance past the messages of the next case and
+            // silently turn it into an empty mailbox.
+            let handler = ContractHandler::new(&root)
+                .with_store(
+                    ConfigContext::new(root.clone(), root.clone(), environment.clone()),
+                    now,
+                )
+                .with_imap_dialer(std::sync::Arc::new(ScriptedDialer::from_fixture()))
+                .with_hwm_store(std::sync::Arc::new(MemoryHwmStore::new()));
+            let request = case.request.as_deref().expect("case request");
+            let outcome = initialize(request.as_bytes(), &handler);
+            match (&case.response, outcome) {
+                (Some(expected), InitializeOutcome::Response(bytes)) => {
+                    assert_eq!(
+                        String::from_utf8(bytes).expect("UTF-8 response"),
+                        *expected,
+                        "{}",
+                        case.name
+                    );
+                }
+                (Some(expected), InitializeOutcome::Notification) => {
+                    panic!("{} produced no response, expected {expected}", case.name);
+                }
+                (Some(_), InitializeOutcome::ParseError) => {
+                    panic!("{} did not parse", case.name);
+                }
+                (None, InitializeOutcome::Response(bytes)) => {
+                    assert!(
+                        case.parse_error,
+                        "{} answered unexpectedly: {}",
+                        case.name,
+                        String::from_utf8_lossy(&bytes)
+                    );
+                }
+                (None, _) => {}
+            }
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The bare legacy `redact_file` method answers the Go oracle's own bytes.
+    ///
+    /// It is a separate branch of the Go server switch, not a `tools/call`
+    /// alias: it reads its path from object **or** positional params, answers
+    /// both a bad path argument and a handler failure with `-32602`, and returns
+    /// the result **without** the content envelope. Each of those is a measured
+    /// case, so a regression in any one of them fails here. `workspace()` writes
+    /// the same two files the oracle recorded against.
+    #[test]
+    fn source_bound_legacy_redact_file_fixture_matches() {
+        #[derive(Deserialize)]
+        struct LegacyCase {
+            name: String,
+            request: Option<String>,
+            response: Option<String>,
+            #[serde(default)]
+            parse_error: bool,
+        }
+
+        #[derive(Deserialize)]
+        struct LegacyFixture {
+            source_revision: String,
+            source_path: String,
+            cases: Vec<LegacyCase>,
+        }
+
+        let fixture: LegacyFixture = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/mcp-contract/mcp-006/cases.json"
+        ))
+        .expect("legacy redact_file fixture");
+        assert_eq!(
+            fixture.source_revision, "79bf23e83b31f18d98487101200eaf32749e5a46",
+            "legacy fixture source revision"
+        );
+        assert_eq!(
+            fixture.source_path, "internal/mcp/server.go:237-265",
+            "legacy fixture source path"
+        );
+        assert!(!fixture.cases.is_empty(), "legacy fixture lost its cases");
+
+        let root = workspace("legacy-redact-file");
+        let handler = ContractHandler::new(&root);
+
+        for case in &fixture.cases {
+            let request = case.request.as_deref().expect("case request");
+            match (&case.response, initialize(request.as_bytes(), &handler)) {
+                (Some(expected), InitializeOutcome::Response(bytes)) => {
+                    assert_eq!(
+                        String::from_utf8(bytes).expect("UTF-8 response"),
+                        *expected,
+                        "{}",
+                        case.name
+                    );
+                }
+                (Some(expected), InitializeOutcome::Notification) => {
+                    panic!("{} produced no response, expected {expected}", case.name);
+                }
+                (Some(_), InitializeOutcome::ParseError) => {
+                    panic!("{} did not parse", case.name);
+                }
+                (None, InitializeOutcome::Response(bytes)) => {
+                    assert!(
+                        case.parse_error,
+                        "{} answered unexpectedly: {}",
+                        case.name,
+                        String::from_utf8_lossy(&bytes)
+                    );
+                }
+                (None, _) => {}
+            }
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn source_bound_go_mcp_clock_results_match_fixed_instant() {
+        use std::collections::BTreeMap;
+        use symeraseme_core::config::ConfigContext;
+
+        #[derive(Deserialize)]
+        struct ClockCase {
+            name: String,
+            state: String,
+            tool: String,
+            arguments: Map<String, Value>,
+            result: Value,
+            request: String,
+            response: String,
+        }
+
+        #[derive(Deserialize)]
+        struct ClockFixture {
+            oracle_source: String,
+            now: String,
+            cases: Vec<ClockCase>,
+        }
+
+        let root = workspace("clock-parity");
+        // The authenticated native record includes both hostile-path controls.
+        let raw = super::frozen_mcp_runtime::observation("mcp-clock");
+        let fixture: ClockFixture = serde_json::from_slice(&raw).expect("actual clock oracle");
+        assert_eq!(
+            fixture.oracle_source,
+            "live current-checkout Go ContractHandler"
+        );
+        assert_eq!(fixture.now, "2026-08-05T12:00:00Z");
+        assert_eq!(fixture.cases.len(), 6);
+        let expected = [
+            ("empty_dashboard", "empty", "get_dashboard_data", json!({})),
+            (
+                "empty_calendar_defaults_to_four_weeks",
+                "empty",
+                "get_calendar",
+                json!({}),
+            ),
+            (
+                "populated_dashboard_counts_request_statuses",
+                "populated",
+                "get_dashboard_data",
+                json!({}),
+            ),
+            (
+                "calendar_includes_exact_horizon_and_current_instant",
+                "populated",
+                "get_calendar",
+                json!({"weeks": 1}),
+            ),
+            (
+                "calendar_zero_weeks_keeps_past_and_current_markers",
+                "populated",
+                "get_calendar",
+                json!({"weeks": 0}),
+            ),
+            (
+                "calendar_filters_campaign",
+                "populated",
+                "get_calendar",
+                json!({"campaign_id": "alpha", "weeks": 1}),
+            ),
+        ];
+        for (case, (name, state, tool, arguments)) in fixture.cases.iter().zip(expected) {
+            assert_eq!(case.name, name);
+            assert_eq!(case.state, state, "{name}");
+            assert_eq!(case.tool, tool, "{name}");
+            assert_eq!(
+                serde_json::to_value(&case.arguments).expect("case arguments"),
+                arguments,
+                "{name} arguments"
+            );
+        }
+        let now = DateTime::parse_from_rfc3339(&fixture.now)
+            .expect("fixed instant")
+            .with_timezone(&Utc);
+
+        for case in fixture.cases {
+            let data_dir = root.join(&case.name).join("data");
+            fs::create_dir_all(&data_dir).expect("data dir");
+            let store = Store::open(data_dir.join("symeraseme.db")).expect("open store");
+            if case.state == "populated" {
+                store
+                    .connection()
+                    .execute_batch(
+                        "INSERT INTO campaigns (id, created_at, kind, notes) VALUES
+                            ('alpha', '2026-08-01T12:00:00+00:00', 'initial', NULL),
+                            ('beta', '2026-08-02T12:00:00+00:00', 'initial', NULL);
+                         INSERT INTO removal_requests (id, broker_id, channel, campaign_id, created_at, jurisdiction, template_id) VALUES
+                            (1, 'broker-past', 'email', 'alpha', '2026-08-01T13:00:00+00:00', 'DE', ''),
+                            (2, 'broker-horizon', 'email', 'alpha', '2026-08-01T14:00:00+00:00', 'DE', ''),
+                            (3, 'broker-now', 'email', 'alpha', '2026-08-01T15:00:00+00:00', 'DE', ''),
+                            (4, 'broker-resolved', 'email', 'alpha', '2026-08-01T16:00:00+00:00', 'DE', ''),
+                            (5, 'broker-after', 'email', 'alpha', '2026-08-01T17:00:00+00:00', 'DE', ''),
+                            (6, 'broker-beta', 'email', 'beta', '2026-08-02T13:00:00+00:00', 'US', '');
+                         INSERT INTO request_state (request_id, current_status, last_event_at, sent_at, resolved_at, deadline_at, next_action_at, reminders_sent, escalation_level) VALUES
+                            (1, 'SENT', '2026-08-01T13:00:00+00:00', '2026-08-01T13:00:00+00:00', NULL, '2026-08-04T12:00:00+00:00', NULL, 0, 0),
+                            (2, 'AWAITING_RESPONSE', '2026-08-01T14:00:00+00:00', '2026-08-01T14:00:00+00:00', NULL, '2026-08-12T12:00:00+00:00', NULL, 1, 1),
+                            (3, 'AWAITING_ACK', '2026-08-01T15:00:00+00:00', '2026-08-01T15:00:00+00:00', NULL, '2026-08-20T12:00:00+00:00', '2026-08-05T12:00:00+00:00', 0, 0),
+                            (4, 'CONFIRMED', '2026-08-01T16:00:00+00:00', '2026-08-01T16:00:00+00:00', '2026-08-03T12:00:00+00:00', '2026-08-04T12:00:00+00:00', NULL, 0, 0),
+                            (5, 'REJECTED_FINAL', '2026-08-01T17:00:00+00:00', '2026-08-01T17:00:00+00:00', NULL, '2026-08-12T12:00:01+00:00', NULL, 0, 2),
+                            (6, 'PLANNED', '2026-08-02T13:00:00+00:00', NULL, NULL, '2026-08-06T12:00:00+00:00', NULL, 0, 0);",
+                    )
+                    .expect("seed populated calendar and statuses");
+            } else {
+                assert_eq!(case.state, "empty", "{}", case.name);
+            }
+            store.close().expect("close seed store");
+
+            let mut environment = BTreeMap::new();
+            environment.insert(
+                "SYMERASEME_DATA_DIR".to_owned(),
+                data_dir.to_string_lossy().into_owned(),
+            );
+            let handler = ContractHandler::new(&root).with_store(
+                ConfigContext::new(root.clone(), root.clone(), environment),
+                now,
+            );
+            let actual = handler
+                .call(&case.tool, &case.arguments)
+                .unwrap_or_else(|error| panic!("{}: {error}", case.name));
+            assert_eq!(actual, case.result, "{}", case.name);
+            let wire = match initialize(case.request.as_bytes(), &handler) {
+                InitializeOutcome::Response(bytes) => bytes,
+                other => panic!("{} expected a complete response, got {other:?}", case.name),
+            };
+            assert_eq!(
+                wire,
+                case.response.as_bytes(),
+                "{} complete current-Go response bytes",
+                case.name
+            );
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Replay the real Go server capture, including its complete result envelope.
+    #[test]
+    fn remaining_tool_responses_match_current_go_bytes() {
+        use sha2::{Digest, Sha256};
+        use std::collections::BTreeMap;
+        use symeraseme_core::config::ConfigContext;
+        let root = tempfile::tempdir().unwrap();
+        let raw = super::frozen_mcp_runtime::observation("mcp-tool-gaps");
+        let oracle: Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(oracle["schema"], "symeraseme.go-oracle.mcp-tool-gaps.v1");
+        assert_eq!(oracle["go_version"], "go1.26.6");
+        let sources = oracle["sources_sha256"].as_object().unwrap();
+        assert_eq!(sources.len(), 9);
+        for (source, digest) in sources {
+            let expected =
+                Sha256::digest(super::frozen_mcp_runtime::go_source_pin::current_source(
+                    concat!(env!("CARGO_MANIFEST_DIR"), "/../.."),
+                    source,
+                ))
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            assert_eq!(digest.as_str().unwrap(), expected, "{source}");
+        }
+        let now = DateTime::parse_from_rfc3339(oracle["now"].as_str().unwrap())
+            .unwrap()
+            .with_timezone(&Utc);
+        let cases = oracle["cases"].as_array().unwrap();
+        assert_eq!(cases.len(), 25);
+        for case in cases {
+            let name = case["name"].as_str().unwrap();
+            let data = root.path().join(name).join("data");
+            fs::create_dir_all(&data).unwrap();
+            Store::open(data.join("symeraseme.db"))
+                .unwrap()
+                .close()
+                .unwrap();
+            if case["bad_store"] == true {
+                fs::write(
+                    data.join("symeraseme.db"),
+                    b"synthetic corrupt SQLite database",
+                )
+                .unwrap();
+            }
+            let mut environment = BTreeMap::new();
+            environment.insert(
+                "SYMERASEME_DATA_DIR".into(),
+                data.to_string_lossy().into_owned(),
+            );
+            let handler = ContractHandler::new(root.path())
+                .with_store(
+                    ConfigContext::new(root.path().to_owned(), root.path().to_owned(), environment),
+                    now,
+                )
+                .with_data_dir(&data);
+            let request = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":case["tool"],"arguments":case["arguments"]}});
+            let actual = match initialize(&serde_json::to_vec(&request).unwrap(), &handler) {
+                InitializeOutcome::Response(bytes) => bytes,
+                other => panic!("{name}: expected a complete response, got {other:?}"),
+            };
+            assert_response_matches(
+                name,
+                Some(String::from_utf8(actual).unwrap()),
+                case["response"].as_str(),
+            );
+        }
+        eprintln!(
+            "25 recorded Go tool gap cases match complete response bytes; nine source digests verified"
+        );
+    }
+
+    /// Builds a handler whose store lives under an isolated data dir with a
+    /// pinned instant and unavailable LLM endpoint. Provider tests override
+    /// the environment explicitly instead of reaching a developer's Ollama.
+    fn seeded_handler(name: &str) -> (PathBuf, ContractHandler) {
+        let root = workspace(name);
+        let data_dir = root.join("data");
+        fs::create_dir_all(&data_dir).expect("data dir");
+        let mut environment = std::collections::BTreeMap::new();
+        environment.insert(
+            "SYMERASEME_DATA_DIR".to_owned(),
+            data_dir.to_string_lossy().into_owned(),
+        );
+        let now = DateTime::parse_from_rfc3339("2026-08-06T12:00:00+00:00")
+            .expect("pinned instant")
+            .with_timezone(&Utc);
+        let handler = ContractHandler::new(&root)
+            .with_store(
+                ConfigContext::new(root.clone(), root.clone(), environment),
+                now,
+            )
+            .with_test_llm_environment(HashMap::from([(
+                "SYMERASEME_LLM_BASE_URL".to_owned(),
+                "http://127.0.0.1:0".to_owned(),
+            )]));
+        (root, handler)
+    }
+
+    fn scripted_llm(contents: Vec<&'static str>) -> (String, thread::JoinHandle<Vec<Value>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake LLM");
+        listener
+            .set_nonblocking(true)
+            .expect("set fake LLM listener nonblocking");
+        let address = listener.local_addr().expect("fake LLM address");
+        let server = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for content in contents {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                let (mut stream, _) = loop {
+                    match listener.accept() {
+                        Ok(connection) => break connection,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline, "timed out accepting LLM request");
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("accept LLM request: {error}"),
+                    }
+                };
+                stream
+                    .set_nonblocking(false)
+                    .expect("set accepted fake LLM stream blocking");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .expect("set fake LLM read timeout");
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                let (header_end, body_len) = loop {
+                    let read = stream.read(&mut buffer).expect("read LLM request");
+                    assert_ne!(read, 0, "LLM client closed before completing the request");
+                    request.extend_from_slice(&buffer[..read]);
+                    if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let header_end = end + 4;
+                        let headers = String::from_utf8_lossy(&request[..end]);
+                        let content_length = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().ok())
+                                    .flatten()
+                            })
+                            .expect("content length");
+                        if request.len() >= header_end + content_length {
+                            break (header_end, content_length);
+                        }
+                    }
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end - 4]);
+                let path = headers
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .expect("request path");
+                assert_eq!(path, "/v1/chat/completions");
+                requests.push(
+                    serde_json::from_slice::<Value>(&request[header_end..header_end + body_len])
+                        .expect("LLM request body JSON"),
+                );
+
+                let body = json!({
+                    "choices": [{"message": {"content": content}, "finish_reason": "stop"}]
+                })
+                .to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .expect("write LLM response");
+            }
+            requests
+        });
+        (format!("http://{address}/v1"), server)
+    }
+
+    /// A seeded or empty store behind the frozen mcp-poll mailbox.
+    fn poll_handler(name: &str, seed: bool) -> (PathBuf, ContractHandler) {
+        let (root, handler) = seeded_handler(name);
+        if seed {
+            let store = Store::open(root.join("data").join("symeraseme.db")).expect("store");
+            store
+                .connection()
+                .execute_batch(include_str!(
+                    "../../../../tests/fixtures/mcp-contract/mcp-003-poll/seed.sql"
+                ))
+                .expect("frozen poll rows");
+            drop(store);
+        }
+        let handler = handler
+            .with_imap_dialer(std::sync::Arc::new(ScriptedDialer::from_fixture()))
+            .with_hwm_store(std::sync::Arc::new(MemoryHwmStore::new()));
+        (root, handler)
+    }
+
+    fn poll_arguments(pairs: Vec<(&str, serde_json::Value)>) -> Map<String, Value> {
+        pairs
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value))
+            .collect::<Map<String, Value>>()
+    }
+
+    /// The poll answer carries its report as JSON text.
+    fn poll_payload(value: &Value) -> Value {
+        serde_json::from_str(value.as_str().expect("poll answer is text")).expect("payload JSON")
+    }
+
+    /// A store close failure fails the call around an otherwise fine result,
+    /// and joins with an operation failure instead of hiding it.
+    #[test]
+    fn close_result_reports_store_close_failures_around_the_operation_outcome() {
+        use symeraseme_core::storage::EncryptedStoreError;
+
+        let close_failure = || EncryptedStoreError::Io(std::io::Error::other("disk is gone"));
+        let error =
+            ContractHandler::close_result(Ok(serde_json::json!({"a": 1})), Err(close_failure()))
+                .expect_err("a close failure must fail the call");
+        assert_eq!(
+            error.message,
+            "eventstore: close: eventstore I/O error: disk is gone"
+        );
+
+        let error = ContractHandler::close_result(
+            Err(ToolError("operation failed".to_owned())),
+            Err(close_failure()),
+        )
+        .expect_err("both failures must be reported");
+        assert_eq!(
+            error.message,
+            "operation failed; eventstore: close: eventstore I/O error: disk is gone"
+        );
+    }
+
+    /// The Go marshalling contract: sorted keys, and a `message` field is
+    /// dropped when an error is present.
+    #[test]
+    fn result_payload_sorts_go_map_keys_and_drops_message_on_error() {
+        let success = ContractHandler::result_payload(
+            true,
+            None,
+            vec![
+                ("zeta", serde_json::json!(1)),
+                ("alpha", serde_json::json!(2)),
+            ],
+        );
+        let object = success.as_object().expect("object payload");
+        assert_eq!(
+            object.keys().cloned().collect::<Vec<_>>(),
+            vec!["alpha", "success", "zeta"]
+        );
+        assert_eq!(success["success"], serde_json::json!(true));
+
+        let failure = ContractHandler::result_payload(
+            false,
+            Some("boom".to_owned()),
+            vec![
+                ("message", serde_json::json!("ignored")),
+                ("code", serde_json::json!("invalid_spec")),
+            ],
+        );
+        let object = failure.as_object().expect("object payload");
+        assert_eq!(failure["error"], serde_json::json!("boom"));
+        assert_eq!(failure["code"], serde_json::json!("invalid_spec"));
+        assert!(
+            !object.contains_key("message"),
+            "message is suppressed when an error is present: {failure}"
+        );
+        assert_eq!(
+            object.keys().cloned().collect::<Vec<_>>(),
+            vec!["code", "error", "success"]
+        );
+    }
+
+    /// A matched message with no date or flags renders raw `null`, the way Go
+    /// splices the literal into its struct text.
+    #[test]
+    fn matched_message_json_renders_absent_date_and_flags_as_null() {
+        use symeraseme_core::email::types::{MatchMethod, MatchedMessage, Message};
+
+        let matched = MatchedMessage {
+            message: Message {
+                id: "1".to_owned(),
+                subject: "Subject".to_owned(),
+                from: "from@example.invalid".to_owned(),
+                to: "to@example.invalid".to_owned(),
+                date: None,
+                body: "Body".to_owned(),
+                flags: None,
+                message_id: "<m@example.invalid>".to_owned(),
+                thread_id: "t1".to_owned(),
+                imap_uid: 1,
+            },
+            request_id: None,
+            match_method: MatchMethod::Unmatched,
+        };
+        let rendered = go_matched_message_json(&matched);
+        assert!(rendered.contains("\"Date\":null"), "{rendered}");
+        assert!(rendered.contains("\"Flags\":null"), "{rendered}");
+        assert!(rendered.contains("\"RequestID\":null"), "{rendered}");
+    }
+
+    /// Without an injected instant the call fails loudly instead of reading a
+    /// wall clock Go would never see.
+    #[test]
+    fn run_web_form_fails_loudly_when_no_instant_was_injected() {
+        let (root, handler) = seeded_handler("run-web-form-no-instant");
+        let mut handler = handler;
+        handler.now = None;
+        let mut arguments = Map::new();
+        arguments.insert("broker_id".to_owned(), serde_json::json!("redfin-us"));
+        let error = handler
+            .call("run_web_form", &arguments)
+            .expect_err("an instant is required");
+        assert_eq!(
+            error.message,
+            "this tool needs an injected instant and none was supplied"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A non-dry run without any consent artifact fails closed before it can
+    /// plan anything — and the consent file argument short-circuits the env
+    /// chain, so the wording is deterministic.
+    #[test]
+    fn execute_live_run_fails_closed_without_a_consent_artifact() {
+        let (root, handler) = seeded_handler("execute-consent");
+        let mut arguments = Map::new();
+        arguments.insert("dry_run".to_owned(), serde_json::json!(false));
+        arguments.insert(
+            "consent_file".to_owned(),
+            serde_json::json!(root.join("missing.consent").to_string_lossy()),
+        );
+        let error = handler
+            .call("execute", &arguments)
+            .expect_err("live execution must require consent");
+        assert_eq!(error.message, "identity: consent denied");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A dry run needs no consent and no profile: it answers the plan for the
+    /// named campaign from the embedded registry.
+    #[test]
+    fn execute_dry_run_answers_without_consent_or_a_profile() {
+        let (root, handler) = seeded_handler("execute-dry");
+        let mut arguments = Map::new();
+        arguments.insert("dry_run".to_owned(), serde_json::json!(true));
+        arguments.insert("campaign_id".to_owned(), serde_json::json!("none"));
+        let result = handler
+            .call("execute", &arguments)
+            .expect("dry run succeeds");
+        assert_eq!(result["campaign_id"], serde_json::json!("none"));
+        assert_eq!(result["total_planned"], serde_json::json!(0));
+        assert_eq!(result["batch_size"], serde_json::json!(0));
+        assert_eq!(result["results"], serde_json::json!([]));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// An unknown provider names itself and the known list, before any model
+    /// is built or any store row is read.
+    #[test]
+    fn triage_agent_rejects_an_unknown_provider_with_the_known_provider_list() {
+        let (root, handler) = seeded_handler("triage-unknown-provider");
+        let mut arguments = Map::new();
+        arguments.insert(
+            "provider".to_owned(),
+            serde_json::json!("not-a-real-provider"),
+        );
+        let error = handler
+            .call("classify_reply", &arguments)
+            .expect_err("unknown provider must fail");
+        assert!(
+            error
+                .message
+                .contains("unknown LLM provider \"not-a-real-provider\""),
+            "{}",
+            error.message
+        );
+        assert!(
+            error.message.contains("Known providers"),
+            "{}",
+            error.message
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// With a known provider but no reply row, classification reports the
+    /// missing reply instead of calling the model.
+    #[test]
+    fn classify_reply_reports_a_missing_reply_before_invoking_the_model() {
+        let (root, handler) = seeded_handler("classify-missing-reply");
+        let mut arguments = Map::new();
+        arguments.insert("provider".to_owned(), serde_json::json!("ollama"));
+        arguments.insert("request_id".to_owned(), serde_json::json!(4242));
+        let error = handler
+            .call("classify_reply", &arguments)
+            .expect_err("no reply to classify");
+        assert_eq!(
+            error.message,
+            "no unclassified inbox reply found for request #4242"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cancelled_classification_flows_through_handler_service_and_agent() {
+        let (root, handler) = seeded_handler("classify-cancelled");
+        let handler = handler.with_test_llm_environment(HashMap::from([(
+            "SYMERASEME_AGENT_BACKEND".to_owned(),
+            "claude".to_owned(),
+        )]));
+        let store = Store::open(root.join("data").join("symeraseme.db")).expect("store");
+        let request_id = Repository::new(&store)
+            .create_removal_request(
+                "broker-x",
+                "email",
+                "campaign-x",
+                "DE",
+                "gdpr-art17.de.md.j2",
+                "",
+            )
+            .expect("request");
+        store
+            .connection()
+            .execute(
+                "INSERT INTO inbox_replies (request_id, message_id, thread_id, from_addr, subject, snippet) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                (
+                    request_id,
+                    "m1",
+                    "t1",
+                    "broker@example.invalid",
+                    "Re: deletion",
+                    "We need your address.",
+                ),
+            )
+            .expect("reply row");
+        drop(store);
+
+        let mut arguments = Map::new();
+        arguments.insert("provider".to_owned(), json!("agent"));
+        arguments.insert("request_id".to_owned(), json!(request_id));
+        let cancellation = llm::CancellationToken::default();
+        cancellation.cancel();
+        let error = handler
+            .call_cancellable("classify_reply", &arguments, &cancellation)
+            .expect_err("cancelled agent call must surface through the tool handler");
+        assert_eq!(error.message, "context canceled");
+
+        let store = Store::open(root.join("data").join("symeraseme.db")).expect("reopen store");
+        let classified: Option<String> = store
+            .connection()
+            .query_row(
+                "SELECT classified_as FROM inbox_replies WHERE request_id = ?1",
+                [request_id],
+                |row| row.get(0),
+            )
+            .expect("read classification state");
+        assert_eq!(classified, None, "cancelled calls are not persisted");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// An unresponsive model surfaces through the outcome's error slot, not a
+    /// fabricated classification: the isolated endpoint cannot serve a model.
+    #[test]
+    fn classify_reply_surfaces_model_transport_failures() {
+        let (root, handler) = seeded_handler("classify-model-failure");
+        let store = Store::open(root.join("data").join("symeraseme.db")).expect("store");
+        let request_id = Repository::new(&store)
+            .create_removal_request(
+                "broker-x",
+                "email",
+                "campaign-x",
+                "DE",
+                "gdpr-art17.de.md.j2",
+                "",
+            )
+            .expect("request");
+        store
+            .connection()
+            .execute(
+                "INSERT INTO inbox_replies (request_id, message_id, thread_id, from_addr, subject, snippet) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                (
+                    request_id,
+                    "m1",
+                    "t1",
+                    "broker@example.invalid",
+                    "Re: deletion",
+                    "We need your address.",
+                ),
+            )
+            .expect("reply row");
+        drop(store);
+
+        let mut arguments = Map::new();
+        arguments.insert("provider".to_owned(), serde_json::json!("ollama"));
+        arguments.insert("request_id".to_owned(), serde_json::json!(request_id));
+        let error = handler
+            .call("classify_reply", &arguments)
+            .expect_err("an unreachable model must surface");
+        assert!(
+            error.message.contains("transport_error"),
+            "CoreKit preserves Go llmkit's transport error class: {}",
+            error.message
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn classify_and_rebuttal_mcp_tools_use_the_corekit_llm_transport() {
+        let (root, handler) = seeded_handler("llm-mcp-consumers");
+        let store = Store::open(root.join("data").join("symeraseme.db")).expect("store");
+        let request_id = Repository::new(&store)
+            .create_removal_request(
+                "broker-x",
+                "email",
+                "campaign-x",
+                "DE",
+                "gdpr-art17.de.md.j2",
+                "",
+            )
+            .expect("request");
+        store
+            .connection()
+            .execute(
+                "INSERT INTO inbox_replies (request_id, message_id, thread_id, from_addr, subject, snippet) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                (
+                    request_id,
+                    "m1",
+                    "t1",
+                    "broker@example.invalid",
+                    "Re: deletion",
+                    "We could not verify the address on your account.",
+                ),
+            )
+            .expect("reply row");
+        drop(store);
+
+        let (base_url, server) = scripted_llm(vec![
+            r#"{"classification":"rejected","confidence":0.91,"summary":"address mismatch","extracted_fields":{}}"#,
+            r#"{"classification":"address_mismatch","confidence":0.93,"summary":"address mismatch","key_points":["address"],"jurisdiction":"GDPR"}"#,
+        ]);
+        let handler = handler.with_test_llm_environment(HashMap::from([
+            ("SYMERASEME_LLM_BASE_URL".to_owned(), base_url),
+            (
+                "OPENAI_API_KEY".to_owned(),
+                "synthetic-mcp-test-key".to_owned(),
+            ),
+        ]));
+
+        let mut arguments = Map::new();
+        arguments.insert("provider".to_owned(), json!("openai"));
+        arguments.insert("model".to_owned(), json!("gpt-4o"));
+        arguments.insert("request_id".to_owned(), json!(request_id));
+        arguments.insert("save".to_owned(), json!(false));
+        let classified = handler
+            .call("classify_reply", &arguments)
+            .expect("classify reply MCP handler");
+        let classified: Value =
+            serde_json::from_str(classified.as_str().expect("Go-compatible result string"))
+                .expect("classification JSON result");
+        assert_eq!(classified["classification"], "rejected");
+
+        let rebuttal = handler
+            .call("generate_rebuttal", &arguments)
+            .expect("generate rebuttal MCP handler");
+        let rebuttal: Value =
+            serde_json::from_str(rebuttal.as_str().expect("Go-compatible result string"))
+                .expect("rebuttal JSON result");
+        assert_eq!(rebuttal["LLMUsed"], true);
+        assert_eq!(rebuttal["RejectionClassification"], "address_mismatch");
+
+        let requests = server.join().expect("fake LLM server");
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["model"], "gpt-4o");
+        assert_eq!(
+            requests[0]["messages"][0]["content"],
+            triage_service::CLASSIFIER_SYSTEM_PROMPT
+        );
+        assert_eq!(requests[1]["model"], "gpt-4o");
+        assert_eq!(
+            requests[1]["messages"][0]["content"],
+            triage_service::REBUTTAL_SYSTEM_PROMPT
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// With no model reachable the rebuttal falls back to the template
+    /// pipeline: llm_used false, classification `fallback`, human review
+    /// required, zero cost — and a non-empty rendered body.
+    #[test]
+    fn generate_rebuttal_falls_back_to_the_template_when_the_model_is_unreachable() {
+        let (root, handler) = seeded_handler("rebuttal-fallback");
+        let mut arguments = Map::new();
+        arguments.insert("provider".to_owned(), serde_json::json!("ollama"));
+        arguments.insert("save".to_owned(), serde_json::json!(false));
+        arguments.insert("request_id".to_owned(), serde_json::json!(77));
+        let value = handler
+            .call("generate_rebuttal", &arguments)
+            .expect("fallback rebuttal");
+        let text = value.as_str().expect("go struct text");
+        let parsed: Value = serde_json::from_str(text).expect("valid JSON");
+        assert_eq!(parsed["LLMUsed"], serde_json::json!(false));
+        assert_eq!(
+            parsed["RejectionClassification"],
+            serde_json::json!("fallback")
+        );
+        assert_eq!(parsed["NeedsHumanReview"], serde_json::json!(true));
+        assert_eq!(parsed["Usage"]["Cost"], serde_json::json!(0));
+        assert!(
+            !parsed["RebuttalBody"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty(),
+            "a template body renders without the model: {text}"
+        );
+        assert!(
+            !parsed["TemplateName"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty()
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A non-dry scheduler generation writes every rendered file into the
+    /// requested output directory, creating missing parents.
+    #[test]
+    fn generate_scheduler_writes_rendered_files_outside_dry_run() {
+        let (root, handler) = seeded_handler("generate-scheduler-write");
+        let output = root.join("schedules");
+        let mut arguments = Map::new();
+        arguments.insert("platform".to_owned(), serde_json::json!("cron"));
+        arguments.insert(
+            "output_dir".to_owned(),
+            serde_json::json!(output.to_string_lossy()),
+        );
+        arguments.insert("dry_run".to_owned(), serde_json::json!(false));
+        let result = handler
+            .call("generate_scheduler", &arguments)
+            .expect("files written");
+        assert_eq!(result["success"], serde_json::json!(true));
+        assert_eq!(result["dry_run"], serde_json::json!(false));
+        let files = result["files"].as_array().expect("written file list");
+        assert!(!files.is_empty(), "cron renders at least crontab.txt");
+        for file in files {
+            let path = file.as_str().expect("path string");
+            assert!(Path::new(path).is_file(), "rendered file missing: {path}");
+        }
+        assert!(output.join("crontab.txt").is_file(), "crontab.txt exists");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Poll hours are validated against 0..=23 with Go's wording before any
+    /// file is generated.
+    #[test]
+    fn generate_scheduler_rejects_invalid_poll_hours() {
+        let (root, handler) = seeded_handler("poll-hours");
+        let mut arguments = Map::new();
+        arguments.insert("dry_run".to_owned(), serde_json::json!(true));
+        arguments.insert("poll_hours".to_owned(), serde_json::json!("abc"));
+        let error = handler
+            .call("generate_scheduler", &arguments)
+            .expect_err("non-numeric hour");
+        assert_eq!(
+            error.message,
+            "invalid poll hour \"abc\": choose values from 0 to 23"
+        );
+        arguments.insert("poll_hours".to_owned(), serde_json::json!("24"));
+        let error = handler
+            .call("generate_scheduler", &arguments)
+            .expect_err("out-of-range hour");
+        assert_eq!(
+            error.message,
+            "invalid poll hour \"24\": choose values from 0 to 23"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Without `output` the dashboard answers with its rendered HTML inline
+    /// and writes nothing.
+    #[test]
+    fn generate_dashboard_embeds_the_rendered_html_when_output_is_omitted() {
+        let (root, handler) = seeded_handler("dashboard-embedded");
+        let result = handler
+            .call("generate_dashboard", &Map::new())
+            .expect("dashboard");
+        assert_eq!(result["success"], serde_json::json!(true));
+        let dashboard = result["dashboard"].as_str().expect("html body");
+        assert!(dashboard.contains('<'), "expected an HTML document");
+        assert!(
+            result.get("output_file").is_none(),
+            "no file is written without output"
+        );
+        // The counter keys are always present — Go renders a missing map key
+        // as JSON null, which is exactly what an empty store carries.
+        assert!(result.get("campaigns").is_some(), "campaigns key present");
+        assert!(result.get("requests").is_some(), "requests key present");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// With `output` the report is written with mode 0600 under a created
+    /// parent, and the answer carries the absolute path and size.
+    #[test]
+    fn generate_report_writes_the_rendered_file_when_output_is_set() {
+        let (root, handler) = seeded_handler("report-output");
+        let output = root.join("reports").join("nested").join("report.html");
+        let mut arguments = Map::new();
+        arguments.insert(
+            "output".to_owned(),
+            serde_json::json!(output.to_string_lossy()),
+        );
+        arguments.insert("format".to_owned(), serde_json::json!("html"));
+        arguments.insert("all_campaigns".to_owned(), serde_json::json!(true));
+        let result = handler
+            .call("generate_report", &arguments)
+            .expect("report written");
+        assert_eq!(result["success"], serde_json::json!(true));
+        assert_eq!(result["format"], serde_json::json!("html"));
+        assert_eq!(
+            result["output_file"],
+            serde_json::json!(output.to_string_lossy())
+        );
+        assert!(
+            result["size_bytes"].as_i64().unwrap_or_default() > 0,
+            "the report has content: {result}"
+        );
+        assert!(output.is_file(), "report exists at the requested path");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&output)
+                .expect("metadata")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "written with mode 0600");
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `grant` revoking a token that does not exist reports Go's wording
+    /// without the package prefix.
+    #[test]
+    fn grant_reports_a_missing_revoke_target_with_go_wording() {
+        let (root, handler) = seeded_handler("grant-missing-revoke");
+        let mut arguments = Map::new();
+        arguments.insert(
+            "revoke".to_owned(),
+            serde_json::json!("no-such-consent-token"),
+        );
+        let error = handler
+            .call("grant", &arguments)
+            .expect_err("a missing token fails");
+        assert_eq!(error.message, "consent token not found");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A stored request with an unparseable timestamp keeps its raw column
+    /// text instead of failing the call.
+    #[test]
+    fn list_requests_keeps_unparseable_timestamps_verbatim() {
+        let (root, handler) = seeded_handler("list-requests-timestamp");
+        let store = Store::open(root.join("data").join("symeraseme.db")).expect("store");
+        let repository = Repository::new(&store);
+        let raw = repository
+            .create_removal_request("b1", "email", "c1", "DE", "gdpr-art17.de.md.j2", "hash-raw")
+            .expect("request with raw timestamp");
+        let parsed = repository
+            .create_removal_request(
+                "b2",
+                "email",
+                "c1",
+                "DE",
+                "gdpr-art17.de.md.j2",
+                "hash-parsed",
+            )
+            .expect("request with parseable timestamp");
+        store
+            .connection()
+            .execute(
+                "UPDATE removal_requests SET created_at = 'not a timestamp' WHERE id = ?1",
+                [raw],
+            )
+            .expect("raw timestamp");
+        store
+            .connection()
+            .execute(
+                "UPDATE removal_requests SET created_at = '2026-08-06 10:00:00' WHERE id = ?1",
+                [parsed],
+            )
+            .expect("parseable timestamp");
+        drop(store);
+
+        let value = handler.call("list_requests", &Map::new()).expect("list");
+        let requests = value["requests"].as_array().expect("rows");
+        assert_eq!(requests.len(), 2, "{value}");
+        let by_id = |id: i64| {
+            requests
+                .iter()
+                .find(|row| row["id"] == serde_json::json!(id))
+                .unwrap_or_else(|| panic!("request {id}"))["created_at"]
+                .clone()
+        };
+        assert_eq!(by_id(raw), serde_json::json!("not a timestamp"));
+        assert_eq!(
+            by_id(parsed),
+            serde_json::json!("2026-08-06T10:00:00Z"),
+            "a parseable column is re-rendered in Go's instant format"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// An unknown platform fails before any scheduler mutation, so the
+    /// system's crontab and LaunchAgents are never touched.
+    #[test]
+    fn schedule_install_rejects_unknown_platforms_before_touching_the_system() {
+        let (root, handler) = seeded_handler("schedule-install-unknown");
+        let mut arguments = Map::new();
+        arguments.insert("platform".to_owned(), serde_json::json!("bogus"));
+        let error = handler
+            .call("schedule_install", &arguments)
+            .expect_err("unknown platform");
+        assert_eq!(error.message, "unsupported platform: bogus");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn schedule_uninstall_rejects_unknown_platforms_before_touching_the_system() {
+        let (root, handler) = seeded_handler("schedule-uninstall-unknown");
+        let mut arguments = Map::new();
+        arguments.insert("platform".to_owned(), serde_json::json!("bogus"));
+        let error = handler
+            .call("schedule_uninstall", &arguments)
+            .expect_err("unknown platform");
+        assert_eq!(error.message, "unsupported platform: bogus");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Cron status reports one entry without mutating the crontab — whether
+    /// crontab answers or not, the shape is fixed.
+    #[test]
+    fn schedule_status_reports_cron_without_changing_anything() {
+        let (root, handler) = seeded_handler("schedule-status-cron");
+        let mut arguments = Map::new();
+        arguments.insert("platform".to_owned(), serde_json::json!("cron"));
+        let result = handler.call("schedule_status", &arguments).expect("status");
+        assert_eq!(result["Platform"], serde_json::json!("cron"));
+        let entries = result["Entries"].as_array().expect("entries");
+        assert_eq!(entries.len(), 1, "{result}");
+        assert_eq!(entries[0]["Label"], serde_json::json!("cron"));
+        assert_eq!(entries[0]["Path"], serde_json::json!("crontab"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A dynamic web form queues a durable manual task and reports it inside
+    /// the result map — success stays false, Go-style.
+    #[test]
+    fn run_web_form_creates_a_manual_task_for_an_active_web_form() {
+        let (root, handler) = seeded_handler("run-web-form-create");
+        let mut arguments = Map::new();
+        arguments.insert("broker_id".to_owned(), serde_json::json!("redfin-us"));
+        arguments.insert("dry_run".to_owned(), serde_json::json!(false));
+        let result = handler
+            .call("run_web_form", &arguments)
+            .expect("manual task result");
+        assert_eq!(result["success"], serde_json::json!(false));
+        assert_eq!(
+            result["status"],
+            serde_json::json!("manual_action_required")
+        );
+        assert_eq!(result["reason"], serde_json::json!("dynamic_form"));
+        assert_eq!(result["broker_id"], serde_json::json!("redfin-us"));
+        assert_eq!(result["dry_run"], serde_json::json!(false));
+        assert!(
+            result["url"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("redfin"),
+            "url: {result}"
+        );
+        let task_id = result["task_id"].as_i64().expect("task id");
+        assert!(task_id > 0, "a manual task was queued: {result}");
+        assert!(
+            !result["instructions"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty(),
+            "instructions rendered: {result}"
+        );
+        let store = Store::open(root.join("data").join("symeraseme.db")).expect("store");
+        let count: i64 = store
+            .connection()
+            .query_row("SELECT COUNT(*) FROM manual_tasks", [], |row| row.get(0))
+            .expect("task count");
+        assert_eq!(count, 1);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A broker id of the wrong JSON type falls back like Go's getStr and the
+    /// preview fails as an invalid spec — no task, no planner call.
+    #[test]
+    fn run_web_form_answers_an_invalid_spec_without_queueing_a_task() {
+        let (root, handler) = seeded_handler("run-web-form-invalid");
+        let mut arguments = Map::new();
+        arguments.insert("broker_id".to_owned(), serde_json::json!(5));
+        let result = handler
+            .call_go_map("run_web_form", &arguments)
+            .expect("failure payload");
+        assert_eq!(result["success"], serde_json::json!(false));
+        assert_eq!(result["code"], serde_json::json!("invalid_spec"));
+        assert_eq!(
+            result["error"],
+            serde_json::json!("campaign: broker \"\" not found")
+        );
+        let store = Store::open(root.join("data").join("symeraseme.db")).expect("store");
+        let count: i64 = store
+            .connection()
+            .query_row("SELECT COUNT(*) FROM manual_tasks", [], |row| row.get(0))
+            .expect("task count");
+        assert_eq!(count, 0, "no task for an invalid spec");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The go_map dispatch reports a tool its own arms do not know instead of
+    /// pretending it worked.
+    #[test]
+    fn go_map_dispatch_reports_tools_missing_from_its_own_arms() {
+        let (root, handler) = seeded_handler("go-map-unimplemented");
+        let error = handler
+            .call_go_map("manual_tasks_list", &Map::new())
+            .expect_err("the go_map dispatch has no manual_tasks_list arm");
+        assert_eq!(
+            error.message,
+            "tool manual_tasks_list is not implemented in this slice"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// OAuth2 with an explicit username override, array folders and the
+    /// transport overrides: the fetch runs against the scripted mailbox and
+    /// reports the counts.
+    #[test]
+    fn poll_inbox_honours_oauth_username_override_and_array_folders() {
+        let (root, handler) = poll_handler("poll-oauth-array", false);
+        let arguments = poll_arguments(vec![
+            ("host", serde_json::json!("imap.example.invalid")),
+            ("port", serde_json::json!(1993)),
+            ("username", serde_json::json!("user@example.invalid")),
+            (
+                "oauth2_username",
+                serde_json::json!("oauth-user@example.invalid"),
+            ),
+            ("oauth2_access_token", serde_json::json!("literal-token")),
+            ("password", serde_json::json!("unused-with-oauth")),
+            ("use_tls", serde_json::json!(false)),
+            ("since", serde_json::json!(36500)),
+            ("max_messages", serde_json::json!(5)),
+            ("folders", serde_json::json!(["INBOX"])),
+        ]);
+        let value = handler
+            .call_go_map("poll_inbox", &arguments)
+            .expect("poll succeeds");
+        let payload = poll_payload(&value);
+        assert_eq!(payload["total_fetched"], serde_json::json!(2), "{payload}");
+        assert_eq!(payload["total_matched"], serde_json::json!(0));
+        let message = payload["message"].as_str().expect("report text");
+        assert!(
+            message.starts_with("Fetched 2 messages from inbox"),
+            "{message}"
+        );
+        assert!(message.contains("[unmatched]"), "{message}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A literal password resolves without the vault, and a folder list
+    /// arriving as a JSON string parses into both folders.
+    #[test]
+    fn poll_inbox_resolves_a_literal_password_and_json_string_folders() {
+        let (root, handler) = poll_handler("poll-literal-json-folders", false);
+        let arguments = poll_arguments(vec![
+            ("host", serde_json::json!("imap.example.invalid")),
+            ("username", serde_json::json!("user@example.invalid")),
+            ("password", serde_json::json!("literal-password")),
+            ("since", serde_json::json!(36500)),
+            ("folders", serde_json::json!(r#"["INBOX","Archive"]"#)),
+        ]);
+        let value = handler
+            .call_go_map("poll_inbox", &arguments)
+            .expect("poll succeeds");
+        let payload = poll_payload(&value);
+        assert_eq!(payload["total_fetched"], serde_json::json!(3), "{payload}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// OAuth2 without an explicit oauth username rewrites it from the IMAP
+    /// username, and a comma-separated folder list (with empty segments)
+    /// splits Go-style.
+    #[test]
+    fn poll_inbox_falls_back_to_the_username_and_splits_comma_folders() {
+        let (root, handler) = poll_handler("poll-username-comma-folders", false);
+        let arguments = poll_arguments(vec![
+            ("host", serde_json::json!("imap.example.invalid")),
+            ("username", serde_json::json!("user@example.invalid")),
+            ("oauth2_access_token", serde_json::json!("literal-token")),
+            ("since", serde_json::json!(36500)),
+            ("folders", serde_json::json!("INBOX, ,Archive")),
+        ]);
+        let value = handler
+            .call_go_map("poll_inbox", &arguments)
+            .expect("poll succeeds");
+        let payload = poll_payload(&value);
+        assert_eq!(payload["total_fetched"], serde_json::json!(3), "{payload}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A non-list folders value falls back to the configured folder, and a
+    /// campaign filter narrows the match set over the frozen rows.
+    #[test]
+    fn poll_inbox_filters_by_campaign_when_the_folder_argument_is_not_a_list() {
+        let (root, handler) = poll_handler("poll-campaign-folder-fallback", true);
+        let arguments = poll_arguments(vec![
+            ("host", serde_json::json!("imap.example.invalid")),
+            ("username", serde_json::json!("user@example.invalid")),
+            ("password", serde_json::json!("literal-password")),
+            ("since", serde_json::json!(36500)),
+            ("folders", serde_json::json!(5)),
+            ("campaign_id", serde_json::json!("campaign-1")),
+        ]);
+        let value = handler
+            .call_go_map("poll_inbox", &arguments)
+            .expect("poll succeeds");
+        let payload = poll_payload(&value);
+        assert_eq!(payload["total_fetched"], serde_json::json!(2), "{payload}");
+        assert_eq!(payload["total_matched"], serde_json::json!(1), "{payload}");
+        let message = payload["message"].as_str().expect("report text");
+        assert!(message.contains("[1]"), "{message}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// An env: secret reference that resolves to nothing fails the call with
+    /// the resolver's wording, before any connection is attempted.
+    #[test]
+    fn poll_inbox_fails_loudly_on_an_unresolvable_password_reference() {
+        let (root, handler) = poll_handler("poll-password-env-missing", false);
+        let arguments = poll_arguments(vec![
+            ("host", serde_json::json!("imap.example.invalid")),
+            ("username", serde_json::json!("user@example.invalid")),
+            (
+                "password",
+                serde_json::json!("env://SYMERASEME_MISSING_SECRET_9f3a"),
+            ),
+            ("since", serde_json::json!(36500)),
+        ]);
+        let error = handler
+            .call_go_map("poll_inbox", &arguments)
+            .expect_err("an unresolvable secret must fail");
+        assert!(
+            error
+                .message
+                .starts_with("email: cannot resolve IMAP password: "),
+            "{}",
+            error.message
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A message whose header block carries no Subject line is reported as
+    /// `(no subject)` rather than failing the report render.
+    #[test]
+    fn poll_inbox_labels_messages_without_a_subject_header() {
+        let mut folders = std::collections::HashMap::new();
+        folders.insert(
+            "INBOX".to_owned(),
+            ScriptedFolder {
+                uid_validity: 1,
+                messages: vec![ScriptedMessage {
+                    uid: 1,
+                    flags: vec![],
+                    internal_date: "2026-08-01T10:00:00+00:00".to_owned(),
+                    header: "Message-ID: <no-subject@example.com>\r\n\
+                             From: broker@example.invalid\r\n\
+                             To: user@example.invalid\r\n\
+                             Date: Sat, 01 Aug 2026 10:00:00 +0000\r\n\r\n"
+                        .to_owned(),
+                    body: "Hello".to_owned(),
+                }],
+            },
+        );
+        let (root, handler) = seeded_handler("poll-no-subject");
+        let handler = handler
+            .with_imap_dialer(std::sync::Arc::new(ScriptedDialer { folders }))
+            .with_hwm_store(std::sync::Arc::new(MemoryHwmStore::new()));
+        let arguments = poll_arguments(vec![
+            ("host", serde_json::json!("imap.example.invalid")),
+            ("username", serde_json::json!("user@example.invalid")),
+            ("password", serde_json::json!("literal-password")),
+            ("since", serde_json::json!(36500)),
+        ]);
+        let value = handler
+            .call_go_map("poll_inbox", &arguments)
+            .expect("poll succeeds");
+        let payload = poll_payload(&value);
+        assert_eq!(payload["total_fetched"], serde_json::json!(1), "{payload}");
+        let message = payload["message"].as_str().expect("report text");
+        assert!(message.contains("(no subject)"), "{message}");
+        assert!(message.contains("[unmatched]"), "{message}");
+        let first = payload["messages"]
+            .as_array()
+            .and_then(|messages| messages.first())
+            .expect("message entry");
+        assert_eq!(first["Message"]["Subject"], serde_json::json!(""));
+        let _ = fs::remove_dir_all(&root);
+    }
+}

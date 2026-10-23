@@ -56,9 +56,9 @@ commands:
 
   # Execution
   execute:
-    description: Send removal requests
+    description: Run a campaign; the default Rust CLI has no outbound email/browser adapters, so web forms become manual tasks
     command: >
-      symeraseme execute
+      symeraseme plan execute
       --campaign "{{ campaign_id }}"
       --batch-size {{ batch_size }}
       {% if dry_run %}--dry-run{% endif %}
@@ -77,12 +77,10 @@ commands:
     command: >
       symeraseme poll-inbox
       --username {{ username }}
-      --password "{{ password }}"
       --since {{ since_days }}
       --host {{ host }}
     inputs:
       username: { type: string, prompt: "IMAP username" }
-      password: { type: string, secret: true, prompt: "IMAP password" }
       host: { type: string, default: "imap.gmail.com" }
       since_days: { type: integer, default: 3 }
     output_format: json
@@ -91,10 +89,8 @@ commands:
     description: Classify a broker reply
     command: >
       symeraseme classify-reply {{ request_id }}
-      {% if api_key %}--api-key {{ api_key }}{% endif %}
     inputs:
       request_id: { type: integer, prompt: "Request ID" }
-      api_key: { type: string, secret: true, optional: true }
     output_format: json
 
   # Lifecycle
@@ -109,7 +105,7 @@ commands:
 
   # Actions
   auto_confirm:
-    description: Auto-click confirmation link
+    description: Preview confirmation handling; without an injected browser executor, a non-dry run creates a manual task instead of clicking
     command: >
       symeraseme auto-confirm {{ request_id }}
       {% if dry_run %}--dry-run{% endif %}
@@ -122,10 +118,8 @@ commands:
     description: Generate a rebuttal for a rejection
     command: >
       symeraseme generate-rebuttal {{ request_id }}
-      {% if api_key %}--api-key {{ api_key }}{% endif %}
     inputs:
       request_id: { type: integer, prompt: "Request ID" }
-      api_key: { type: string, secret: true, optional: true }
     output_format: json
 
   # Tokens
@@ -140,6 +134,11 @@ commands:
 
 ### 2. Load the skill in OpenClaw
 
+Configure `IMAP_PASSWORD` or `IMAP_OAUTH2_ACCESS_TOKEN` through the process
+environment or a supported secure-store reference. LLM credentials use the
+configured provider environment. Do not pass resolved credentials as command
+arguments or write them into this YAML file.
+
 ```bash
 openclaw skill load symeraseme
 ```
@@ -152,6 +151,11 @@ openclaw skill list
 ```
 
 ## Example workflow
+
+For the Rust-only source-tree candidate, the default CLI has no outbound email
+sender or browser executor. Non-dry web-form and confirmation operations create
+manual tasks, not successful submissions or clicks. Complete a manual task only
+after the user has performed and confirmed its action.
 
 ```bash
 # 1. Initialize identity
@@ -168,7 +172,7 @@ openclaw run symeraseme.plan_show
 openclaw run symeraseme.execute \
   --inputs '{"campaign_id": "initial", "dry_run": true}'
 
-# 5. Real execution (requires consent)
+# 5. Non-dry execution (requires consent; no outbound adapters by default)
 openclaw run symeraseme.grant \
   --inputs '{"command": "execute", "ttl": 3600}'
 
@@ -176,12 +180,13 @@ openclaw run symeraseme.execute \
   --inputs '{
     "campaign_id": "initial",
     "batch_size": 5,
+    "dry_run": false,
     "consent_token": "<token from grant>"
   }'
 
 # 6. Daily triage
 openclaw run symeraseme.poll_inbox \
-  --inputs '{"username": "jane@gmail.com", "password": "..."}'
+  --inputs '{"username": "jane@example.com"}'
 
 openclaw run symeraseme.classify_reply \
   --inputs '{"request_id": 1}'
@@ -191,7 +196,7 @@ openclaw run symeraseme.auto_confirm \
   --inputs '{"request_id": 1}'
 
 openclaw run symeraseme.generate_rebuttal \
-  --inputs '{"request_id": 2, "api_key": "sk-ant-..."}'
+  --inputs '{"request_id": 2}'
 
 # 8. Daily tick
 openclaw run symeraseme.tick \

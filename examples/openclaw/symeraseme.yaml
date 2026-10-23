@@ -1,0 +1,115 @@
+name: symeraseme
+description: >
+  Automate data broker removals via the Symaira EraseMe CLI.
+  Supports GDPR/CCPA opt-out campaigns with email, web forms,
+  inbox triage, and lifecycle management.
+
+commands:
+  # Identity
+  init_profile:
+    description: Create encrypted identity profile
+    command: symeraseme init-profile
+    inputs:
+      full_name: { type: string, prompt: "Full name" }
+      email: { type: string, prompt: "Email address" }
+
+  show_profile:
+    description: Display current identity profile
+    command: symeraseme show-profile
+    output_format: text
+
+  # Planning
+  plan_create:
+    description: Plan a removal campaign
+    command: >
+      symeraseme plan create
+      --campaign "{{ campaign_id }}"
+      {% if jurisdiction %}--jurisdiction {{ jurisdiction }}{% endif %}
+      {% if max %}--max {{ max }}{% endif %}
+    inputs:
+      campaign_id: { type: string, prompt: "Campaign ID" }
+      jurisdiction: { type: string, optional: true, prompt: "Jurisdiction (GDPR/CCPA)" }
+      max: { type: integer, optional: true, default: 30 }
+    output_format: json
+
+  plan_show:
+    description: Show the current plan
+    command: symeraseme plan show
+    output_format: json
+
+  # Execution
+  execute:
+    description: Run a campaign; the default Rust CLI has no outbound email/browser adapters, so web forms become manual tasks
+    command: >
+      symeraseme plan execute
+      --campaign "{{ campaign_id }}"
+      --batch-size {{ batch_size }}
+      {% if dry_run %}--dry-run{% endif %}
+      {% if consent_token %}--consent {{ consent_token }}{% endif %}
+    inputs:
+      campaign_id: { type: string, prompt: "Campaign ID" }
+      batch_size: { type: integer, default: 5 }
+      dry_run: { type: boolean, default: true }
+      consent_token: { type: string, optional: true }
+    output_format: json
+    consent_required: true
+
+  # Triage
+  poll_inbox:
+    description: Poll inbox for broker replies
+    command: >
+      symeraseme poll-inbox
+      --username {{ username }}
+      --since {{ since_days }}
+      --host {{ host }}
+    inputs:
+      username: { type: string, prompt: "IMAP username" }
+      host: { type: string, default: "imap.gmail.com" }
+      since_days: { type: integer, default: 3 }
+    output_format: json
+
+  classify_reply:
+    description: Classify a broker reply
+    command: >
+      symeraseme classify-reply {{ request_id }}
+    inputs:
+      request_id: { type: integer, prompt: "Request ID" }
+    output_format: json
+
+  # Lifecycle
+  tick:
+    description: Run tick engine
+    command: >
+      symeraseme tick
+      {% if dry_run %}--dry-run{% endif %}
+    inputs:
+      dry_run: { type: boolean, default: true }
+    output_format: json
+
+  # Actions
+  auto_confirm:
+    description: Preview confirmation handling; without an injected browser executor, a non-dry run creates a manual task instead of clicking
+    command: >
+      symeraseme auto-confirm {{ request_id }}
+      {% if dry_run %}--dry-run{% endif %}
+    inputs:
+      request_id: { type: integer, prompt: "Request ID" }
+      dry_run: { type: boolean, default: true }
+    output_format: json
+
+  generate_rebuttal:
+    description: Generate a rebuttal for a rejection
+    command: >
+      symeraseme generate-rebuttal {{ request_id }}
+    inputs:
+      request_id: { type: integer, prompt: "Request ID" }
+    output_format: json
+
+  # Tokens
+  grant:
+    description: Issue a consent token
+    command: symeraseme grant {{ command }} --ttl {{ ttl }}
+    inputs:
+      command: { type: string, default: "execute" }
+      ttl: { type: integer, default: 3600 }
+    output_format: text

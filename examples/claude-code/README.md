@@ -6,15 +6,14 @@ skill bundle for automated data broker removal orchestration.
 ## Prerequisites
 
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed
-- Symaira EraseMe installed (`symeraseme` on PATH)
-- Go CLI available (Homebrew or GitHub release archive)
+- Symaira EraseMe CLI (`symeraseme`) available on `PATH`
 
 ## Setup
 
 ### 1. Link the skill bundle
 
 Claude Code discovers skills from `.claude/skills/` in the project root.
-A pre-configured symlink is included:
+Create the symlink with:
 
 ```bash
 ls -la .claude/skills/
@@ -54,7 +53,7 @@ Claude will use the skills to walk through:
 1. `symeraseme init-profile` — Create your identity vault
 2. `symeraseme plan create` — Scan the broker registry
 3. `symeraseme plan show` — Review the plan with you
-4. `symeraseme execute` — Send removal requests
+4. `symeraseme plan execute --campaign <id> --dry-run` — Preview the plan; the default Rust CLI/MCP path does not send email or submit web forms.
 
 ## Example session
 
@@ -93,22 +92,19 @@ Here's the plan:
   #4 Acxiom (web_form) — CCPA jurisdiction
   #5 Verisk (email) — GDPR jurisdiction
 
-Shall I proceed with executing these 5 requests?
-...
+Let's preview the plan; the default Rust CLI/MCP path has no outbound email
+sender or browser executor:
 
-User: Yes, please execute them.
+→ symeraseme plan execute --campaign initial --dry-run
 
-Claude: I need your consent for this destructive operation. Please confirm:
+[Dry-run summary only; no email is sent and no web form is submitted]
 
-→ symeraseme execute --campaign initial --batch-size 5
-This is a destructive operation. Continue? [y/N]: y
+For a web-form broker, a non-dry `run-web-form` call creates a durable manual
+task instead of opening a browser or claiming submission:
 
-[Results:]
-  #1 OK — sent via email
-  #2 OK — web form submitted
-  #3 OK — sent via email
-  #4 OK — web form submitted
-  #5 OK — sent via email
+→ symeraseme run-web-form spokeo
+→ symeraseme manual-tasks list
+→ symeraseme manual-tasks show <task-id>
 ```
 
 ## Configuration recommendations
@@ -134,14 +130,21 @@ Add to `.claude/settings.json`:
 
 Set these in your shell profile or `.env`:
 
+LLM credentials are needed only when invoking LLM-backed features. The default
+provider is Anthropic; configure only the selected backend:
+
 ```bash
-# Required for LLM-powered features
-export ANTHROPIC_API_KEY="sk-ant-..."
-# Required for CAPTCHA solving
-export CAPSOLVER_API_KEY="CAP-..."
-# Optional: override data directory
+# Only when using Anthropic
+export ANTHROPIC_API_KEY="symvault://anthropic/prod-key"
+# Or use OPENAI_API_KEY for OpenAI, OLLAMA_HOST for a non-default Ollama host,
+# or SYMERASEME_LLM_BASE_URL for an openai-compatible endpoint.
+
+# Optional override; the Rust CLI has a persistent default data directory.
 export SYMERASEME_DATA_DIR="$HOME/.symeraseme"
 ```
+
+Browser execution and CAPTCHA solving are not provided by the default CLI/MCP
+path; web forms use durable manual tasks.
 
 ### Claude Code MCP configuration
 
@@ -151,12 +154,8 @@ For direct tool access (advanced), add to `.claude/mcp.json`:
 {
   "mcpServers": {
     "symeraseme": {
-      "command": "uv",
-      "args": ["run", "symeraseme"],
-      "env": {
-        "ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY}",
-        "SYMERASEME_DATA_DIR": "${HOME}/.symeraseme"
-      }
+      "command": "symeraseme",
+      "args": ["mcp", "--stdio"]
     }
   }
 }

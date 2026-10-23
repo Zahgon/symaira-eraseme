@@ -4,12 +4,6 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch:
-    inputs:
-      release_tag:
-        description: 'Existing release tag to build the GUI DMG for'
-        required: true
-        type: string
 
 permissions:
   contents: write
@@ -19,52 +13,155 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  release-archives:
+    if: github.event_name == 'push'
+    name: Release / Rust CLI archives and native stores
+    # Publish only the same-run archives that passed native copied-store tests.
+    uses: ./.github/workflows/plain-store-switchback.yml
+
   release-cli:
     if: github.event_name == 'push'
-    name: Release / CLI and Homebrew Formula
+    name: Release / Stage CLI draft prerelease
+    needs: release-archives
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
     steps:
-      - name: Checkout
+      - name: Checkout tagged source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: '1.26.6'
-          cache: true
+      - name: Verify pinned CLI release source
+        run: bash scripts/verify-release-source.sh
 
-      - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
+      - name: Require the tag to match the package version
+        run: |
+          set -euo pipefail
+          VERSION="$(python3 -c 'import tomllib,pathlib;print(tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"])')"
+          if [ "$RELEASE_TAG" != "v$VERSION" ]; then
+            echo "::error::Tag $RELEASE_TAG does not match package version v$VERSION."
+            exit 1
+          fi
+          printf 'VERSION=%s\n' "$VERSION" >> "$GITHUB_ENV"
+
+      - name: Download verified Rust archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          distribution: goreleaser
-          version: '~> v2'
-          args: release --clean
+          name: symeraseme-rust-prerelease-archives
+          path: ${{ runner.temp }}/dist
+
+      - name: Re-verify archives, checksums and SBOM sidecars
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/dist"
+          test "$(python3 -c 'import json;print(json.load(open("metadata.json"))["version"])')" = "$VERSION"
+          test "$(grep -c . checksums.txt)" = 6
+          sha256sum --check --strict checksums.txt
+          sha256sum --check --strict sbom-checksums.txt
+
+      - name: Attest build provenance for the six archives
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: ${{ runner.temp }}/dist/checksums.txt
+
+      - name: Attest the twelve SBOM sidecar digests
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/dist/sbom-checksums.txt
+
+      - name: Stage the prerelease and read every asset back
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          bash scripts/verify-release-source.sh
+          cd "$RUNNER_TEMP/dist"
+          NOTES="$RUNNER_TEMP/notes.md"
+          cat > "$NOTES" <<EOF
+          Canary prerelease of symeraseme $VERSION. It is published as a GitHub prerelease
+          and is not offered through Homebrew until it is promoted to a stable release.
+
+          - \`symeraseme\` in every archive is the Rust implementation and the default backend.
+          - No Go backend is bundled; the former backend selector is retired.
+          - Each archive has a CycloneDX SBOM (\`*.cdx.json\`) built from the dependency graph
+            embedded in the Rust binary; \`sbom-checksums.txt\` lists their digests.
+          - Build provenance for the six archives is attested by GitHub; verify with
+            \`gh attestation verify <archive> --repo $GITHUB_REPOSITORY\`.
+
+          Use a copy of your data while evaluating this canary.
+          EOF
+          mapfile -t assets < <(ls -1 symeraseme_* checksums.txt sbom-checksums.txt)
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --prerelease \
+            --title "symeraseme $VERSION (canary)" --notes-file "$NOTES" "${assets[@]}"
+          mkdir "$RUNNER_TEMP/readback"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/readback"
+          for asset in "${assets[@]}"; do
+            cmp "$asset" "$RUNNER_TEMP/readback/$asset"
+          done
+          gh attestation verify "$RUNNER_TEMP/readback/sbom-checksums.txt" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-digest "$GITHUB_SHA" --source-ref "$GITHUB_REF"
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease \
+            --jq '.isDraft == true and .isPrerelease == true' | grep -Fx true
 
   release-gui:
     name: Release / macOS GUI DMG
     needs: release-cli
-    if: ${{ always() && ((github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '') || (github.event_name == 'push' && needs.release-cli.result == 'success')) }}
-    runs-on: macos-15
+    if: ${{ github.event_name == 'push' && needs.release-cli.result == 'success' }}
+    runs-on: macos-26
     environment: release
     env:
-      RELEASE_TAG: ${{ github.event.inputs.release_tag || github.ref_name }}
+      RELEASE_TAG: ${{ github.ref_name }}
     steps:
       - name: Checkout workflow source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          ref: ${{ github.ref }}
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - name: Verify immutable release source
+        run: bash scripts/verify-release-source.sh
+
+      - name: Refuse to replace an existing GUI asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json tagName,assets,isDraft,isPrerelease > "$RUNNER_TEMP/gui-release-preflight.json"
+          jq -e --arg tag "$RELEASE_TAG" --arg asset "Symaira-EraseMe-${RELEASE_TAG#v}-macos.dmg" \
+            '.tagName == $tag and .isDraft == true and .isPrerelease == true and (.assets | type == "array") and all(.assets[]; (.name | type == "string") and .name != $asset)' \
+            "$RUNNER_TEMP/gui-release-preflight.json"
+
+      - name: Select Xcode 26
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
         with:
-          go-version: '1.26.6'
-          cache: true
+          xcode-version: '26.4.1'
+
+      - name: Verify Xcode toolchain
+        run: |
+          set -euo pipefail
+          XCODE_VERSION="$(xcodebuild -version)"
+          echo "$XCODE_VERSION"
+          XCODE_MAJOR="${XCODE_VERSION#Xcode }"
+          XCODE_MAJOR="${XCODE_MAJOR%%.*}"
+          if ! [[ "$XCODE_MAJOR" =~ ^[0-9]+$ ]] || (( XCODE_MAJOR < 26 )); then
+            echo "::error::Expected Xcode 26 or newer, got: $XCODE_VERSION"
+            exit 1
+          fi
+
+      - name: Install pinned Rust backend toolchain
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal
+          printf '%s\n' "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Import Developer ID certificate
         id: signing
@@ -118,13 +215,19 @@ jobs:
       - name: Build and sign macOS app bundle
         run: |
           set -euo pipefail
-          VERSION="${RELEASE_TAG#v}" REQUIRE_SIGNING=true ./scripts/package-dmg.sh --app-only
+          VERSION="${RELEASE_TAG#v}" REQUIRE_SIGNING=true REQUIRE_COMPILED_ICON=true ./scripts/package-dmg.sh --app-only
           APP_PATH="app/SymairaEraseMe/.build/dmg-stage/Symaira EraseMe.app"
           test -d "$APP_PATH"
           test -x "$APP_PATH/Contents/MacOS/Symaira EraseMe"
           test -x "$APP_PATH/Contents/MacOS/symeraseme"
+          test ! -e "$APP_PATH/Contents/MacOS/symeraseme-go"
+          test "$("$APP_PATH/Contents/MacOS/symeraseme" --version)" = "symeraseme version ${RELEASE_TAG#v}"
+          for backend in symeraseme; do
+            codesign --verify --strict --verbose=2 "$APP_PATH/Contents/MacOS/$backend"
+          done
           /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP_PATH/Contents/Info.plist" | grep -Fx 'com.symaira.eraseme'
           /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_PATH/Contents/Info.plist" | grep -Fx "${RELEASE_TAG#v}"
+          REQUIRE_COMPILED_ICON=true ./scripts/verify-app-icon.sh "$APP_PATH"
 
       - name: Notarize and staple macOS app
         env:
@@ -161,7 +264,7 @@ jobs:
       - name: Create and sign DMG container
         run: |
           set -euo pipefail
-          VERSION="${RELEASE_TAG#v}" REQUIRE_SIGNING=true ./scripts/package-dmg.sh --dmg-only
+          VERSION="${RELEASE_TAG#v}" REQUIRE_SIGNING=true REQUIRE_COMPILED_ICON=true ./scripts/package-dmg.sh --dmg-only
           DMG="dist/Symaira-EraseMe-${RELEASE_TAG#v}-macos.dmg"
           test -f "$DMG"
           echo "DMG_PATH=$DMG" >> "$GITHUB_ENV"
@@ -204,13 +307,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          gh release upload "$RELEASE_TAG" "$DMG_PATH" --repo "$GITHUB_REPOSITORY" --clobber
+          bash scripts/verify-release-source.sh
+          gh release upload "$RELEASE_TAG" "$DMG_PATH" --repo "$GITHUB_REPOSITORY"
 
-      - name: Verify published DMG asset and record release
+      - name: Verify staged DMG asset and record release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          bash scripts/verify-release-source.sh
           ASSET_NAME="$(basename "$DMG_PATH")"
           DOWNLOAD_DIR="$RUNNER_TEMP/published-release"
           mkdir -p "$DOWNLOAD_DIR"
@@ -256,7 +361,7 @@ jobs:
               if line.strip() and artifact_name not in line
           ]
           if not existing_lines:
-              raise SystemExit("checksums.txt is empty; expected existing GoReleaser manifest entries")
+              raise SystemExit("checksums.txt is empty; expected the published archive manifest entries")
           existing_lines.append(f"{digest}  {artifact_name}")
           checksums.write_text("\n".join(existing_lines) + "\n")
           PY
@@ -277,3 +382,86 @@ jobs:
           fi
           rm -f "$KEYCHAIN"
           rm -f "$RUNNER_TEMP"/*.p12 "$RUNNER_TEMP"/*.p8 "$RUNNER_TEMP"/*.zip "$RUNNER_TEMP"/*notary*.json "$RUNNER_TEMP"/*response*.json
+
+  attest-dmg:
+    name: Release / Attest DMG and publish immutable prerelease
+    needs: release-gui
+    if: ${{ always() && needs.release-gui.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - name: Checkout attested source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Download the staged DMG
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          bash scripts/verify-release-source.sh
+          mkdir -p "$RUNNER_TEMP/dmg"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern 'Symaira-EraseMe-*-macos.dmg' --dir "$RUNNER_TEMP/dmg"
+          test "$(find "$RUNNER_TEMP/dmg" -name '*.dmg' | wc -l)" -eq 1
+
+      - name: Attest build provenance for the staged DMG
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/dmg/*.dmg
+
+      - name: Publish complete immutable prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          bash scripts/verify-release-source.sh
+          # Drafts are not returned by the published-release tag endpoint.
+          RELEASE_API="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json apiUrl --jq .apiUrl)"
+          gh api --method GET "$RELEASE_API" > "$RUNNER_TEMP/release.json"
+          python3 - "$RUNNER_TEMP/release.json" "$RELEASE_TAG" <<'PY'
+          import json, sys
+          release = json.load(open(sys.argv[1]))
+          tag = sys.argv[2]
+          version = tag.removeprefix('v')
+          archives = {f'symeraseme_{version}_{system}_{arch}.{extension}'
+                      for system, extension in [('darwin', 'tar.gz'), ('linux', 'tar.gz'), ('windows', 'zip')]
+                      for arch in ('amd64', 'arm64')}
+          expected = archives | {name + suffix for name in archives for suffix in ('.cdx.json', '.rust-audit.json')}
+          expected |= {'checksums.txt', 'sbom-checksums.txt', f'Symaira-EraseMe-{version}-macos.dmg'}
+          if release['tag_name'] != tag or release['draft'] is not True or release['prerelease'] is not True:
+              raise SystemExit('Expected the exact draft prerelease')
+          assets = release['assets']
+          if len(assets) != len(expected) or {a['name'] for a in assets} != expected:
+              raise SystemExit('Release asset set is incomplete or duplicated')
+          if any(a['state'] != 'uploaded' for a in assets):
+              raise SystemExit('Release asset upload is incomplete')
+          PY
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/complete-release"
+          cd "$RUNNER_TEMP/complete-release"
+          python3 - "$RUNNER_TEMP/release.json" <<'PY'
+          import json, pathlib, re, sys
+          names = {p.name for p in pathlib.Path('.').iterdir()}
+          if names != {a['name'] for a in json.load(open(sys.argv[1]))['assets']}:
+              raise SystemExit('Downloaded assets differ from the complete release')
+          for manifest, suffixes in [('checksums.txt', ('.tar.gz', '.zip', '.dmg')), ('sbom-checksums.txt', ('.json',))]:
+              entries = [line.split() for line in pathlib.Path(manifest).read_text().splitlines()]
+              expected = {name for name in names if name.endswith(suffixes)}
+              if not entries or any(len(row) != 2 or not re.fullmatch(r'[0-9a-f]{64}', row[0]) for row in entries):
+                  raise SystemExit(f'Malformed checksum manifest: {manifest}')
+              if len(entries) != len(expected) or {row[1] for row in entries} != expected:
+                  raise SystemExit(f'Incomplete or duplicated checksum manifest: {manifest}')
+          PY
+          sha256sum --check --strict checksums.txt
+          sha256sum --check --strict sbom-checksums.txt
+          # Enable repository immutable releases before tagging. The workflow
+          # token has no Administration permission to query that setting.
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false
+          gh api --method GET "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" |
+            jq -e --arg tag "$RELEASE_TAG" '.tag_name == $tag and .draft == false and .prerelease == true and .immutable == true'
