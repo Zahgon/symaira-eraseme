@@ -83,4 +83,5 @@ PLANUNG.md
 ARCHITEKTUR.md
 .claude/
 /symeraseme
+/target/
 /coverage.out
